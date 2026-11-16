@@ -57,7 +57,8 @@
         {
           "motionPermission": "Stylista checks that your phone is upright during body capture."
         }
-      ]
+      ],
+      "onnxruntime-react-native"
     ],
     "experiments": {
       "typedRoutes": true,

@@ -34,6 +34,7 @@ export default function RootLayout() {
           <Stack.Screen name="capture" options={{ animation: 'slide_from_bottom' }} />
           <Stack.Screen name="body" options={{ animation: 'slide_from_right' }} />
           <Stack.Screen name="home" />
+          <Stack.Screen name="dev" />
           <Stack.Screen name="garment/new" options={{ animation: 'slide_from_bottom', presentation: 'fullScreenModal' }} />
           <Stack.Screen name="garment/[id]" options={{ animation: 'slide_from_right' }} />
         </Stack>
