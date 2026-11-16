@@ -80,17 +80,25 @@ export function GarmentEditor({ existing }: { existing?: Garment }) {
 
   /** Photo in: background removal, silhouette scan, then into the editor. */
   const ingest = async (raw: string) => {
+    let imageUri: string | undefined;
     try {
       setBusy('Removing background…');
-      const imageUri = await persistImage(raw, 'garments', 1600);
-      source.current = await prepareGarment(imageUri);
-      setBusy('Reading the shape…');
-      const a = analyzeGarment(source.current);
+      imageUri = await persistImage(raw, 'garments', 1600);
+      let a: ReturnType<typeof analyzeGarment> = { color: draft.color };
+      try {
+        source.current = await prepareGarment(imageUri);
+        setBusy('Reading the shape…');
+        a = analyzeGarment(source.current);
+      } catch (e) {
+        // Segmentation unavailable on this device: keep the photo, fall back to a template.
+        toast(`Background removal failed: ${e instanceof Error ? e.message.slice(0, 80) : 'unknown error'}`);
+        source.current = null;
+      }
       if (draft.imageUri && draft.imageUri !== existing?.imageUri) deleteImage(draft.imageUri);
       dropAtlas(draft.atlasUri);
       const kind: GarmentKind = a.scan ? a.scan.kind : draft.kind;
       patch({ imageUri, color: a.color, scan: a.scan, atlasUri: a.atlasUri, kind, shape: { ...KINDS[kind].defaults }, size: 1 });
-      if (!a.scan) toast('Could not isolate the piece. Using its colour');
+      if (!a.scan && source.current) toast('Could not isolate the piece. Using its colour');
       setStep('edit');
     } catch (e) {
       toast(e instanceof Error ? e.message : 'Could not load that image');

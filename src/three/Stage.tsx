@@ -602,6 +602,8 @@ export function Stage({ body, garments, focus = 'full', autoRotate = true, inter
           // Image-based lighting from a procedural studio room; skipped where the GPU cannot
           // render the required float targets, leaving the direct lights below.
           try {
+            // Prefiltering needs float colour targets; some mobile GL stacks do not expose them.
+            if (!gl.extensions.has('EXT_color_buffer_float') && !gl.extensions.has('EXT_color_buffer_half_float')) throw new Error('no float targets');
             const pmrem = new THREE.PMREMGenerator(gl);
             scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
             scene.environmentIntensity = 0.32;
