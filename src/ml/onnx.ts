@@ -1,7 +1,7 @@
 /** Bundled network inference on device (iOS / Android) through ONNX Runtime. */
-import { Asset } from 'expo-asset';
 import { InferenceSession, Tensor } from 'onnxruntime-react-native';
 
+import { assetUri } from '@/lib/assets';
 import { MODELS, ModelName } from './models';
 
 const sessions = new Map<ModelName, Promise<InferenceSession>>();
@@ -10,9 +10,7 @@ function load(name: ModelName): Promise<InferenceSession> {
   let s = sessions.get(name);
   if (!s) {
     s = (async () => {
-      const asset = Asset.fromModule(MODELS[name]);
-      await asset.downloadAsync();
-      return InferenceSession.create((asset.localUri ?? asset.uri).replace(/^file:\/\//, ''));
+      return InferenceSession.create((await assetUri(MODELS[name])).replace(/^file:\/\//, ''));
     })();
     sessions.set(name, s);
   }

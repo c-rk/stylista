@@ -114,7 +114,7 @@ export interface ScanResult {
   atlas: Uint8Array;
 }
 
-export function scanGarment(img: Pixels, alphaFull: Float32Array, forced?: ScanKind, hints: { crotchY?: number; sleeveless?: boolean } = {}): ScanResult | null {
+export function scanGarment(img: Pixels, alphaFull: Float32Array, forced?: ScanKind, hints: { crotchY?: number; sleeveless?: boolean; uniform?: boolean } = {}): ScanResult | null {
   // ---- crop to the matte's bounding box ------------------------------------------------
   const W0 = img.width, H0 = img.height;
   let x0 = W0, x1 = -1, y0 = H0, y1 = -1;
@@ -364,7 +364,8 @@ export function scanGarment(img: Pixels, alphaFull: Float32Array, forced?: ScanK
   // Colour bleed: push fabric colour a few texels into transparent neighbours so bilinear
   // sampling at the alpha edge never pulls in backdrop colour.
   const AW = w * 2;
-  for (let pass = 0; pass < 6; pass++) {
+  // Uniformly coloured atlases (procedural pieces) have nothing to bleed.
+  for (let pass = 0; pass < (hints.uniform ? 0 : 6); pass++) {
     const snap = atlas.slice();
     for (let y = 0; y < h; y++)
       for (let x = 0; x < AW; x++) {

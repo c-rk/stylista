@@ -12,6 +12,9 @@ import { Toast } from '@/components/Toast';
 import { useStore } from '@/store';
 import { colors } from '@/theme';
 
+// Route-level error screen instead of a silent crash.
+export { ErrorBoundary } from 'expo-router';
+
 SplashScreen.preventAutoHideAsync().catch(() => {});
 
 export default function RootLayout() {

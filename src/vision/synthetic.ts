@@ -110,7 +110,8 @@ export function syntheticGarment(kind: SyntheticKind, shape: GarmentShape): Synt
   const { scanKind, sleeveless } = d;
   const crotchY = d.crotchY === undefined ? undefined : d.crotchY * UP;
   const white = new Uint8Array(w * h * 3).fill(255);
-  const res = scanGarment({ width: w, height: h, channels: 3, data: white }, alpha, scanKind, { crotchY, sleeveless });
+  // (Transparent texels are white too, so edge filtering never darkens the outline.)
+  const res = scanGarment({ width: w, height: h, channels: 3, data: white }, alpha, scanKind, { crotchY, sleeveless, uniform: true });
   if (!res) throw new Error(`synthetic ${kind} produced no silhouette`);
   const out = { scan: res.scan, atlas: res.atlas, width: res.scan.width * 2, height: res.scan.height };
   if (cache.size > 60) cache.clear();

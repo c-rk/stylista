@@ -1,7 +1,7 @@
 /* eslint-disable @typescript-eslint/no-require-imports -- Metro resolves bundled binary assets through require(). */
-import { Asset } from 'expo-asset';
 import { useEffect, useState } from 'react';
 
+import { assetBytes } from '@/lib/assets';
 import meta from './meta.json';
 import { HumanMeta, HumanModel } from './model';
 
@@ -11,10 +11,7 @@ let loaded: HumanModel | undefined;
 /** Loads the bundled body data once; later calls reuse the same model. */
 export function loadHuman(): Promise<HumanModel> {
   pending ??= (async () => {
-    const asset = Asset.fromModule(require('../../../assets/body/body.bin'));
-    await asset.downloadAsync();
-    const res = await fetch(asset.localUri ?? asset.uri);
-    loaded = new HumanModel(meta as unknown as HumanMeta, await res.arrayBuffer());
+    loaded = new HumanModel(meta as unknown as HumanMeta, await assetBytes(require('../../../assets/body/body.bin')));
     return loaded;
   })();
   return pending;

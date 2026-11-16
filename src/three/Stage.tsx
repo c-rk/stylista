@@ -237,7 +237,7 @@ function strands(): THREE.DataTexture {
 }
 
 /** Shell lifts off the scalp (metres at 1.7 m stature) and the strand coverage cut for each. */
-const HAIR_SHELLS: [number, number][] = [[0.004, 0.02], [0.009, 0.3], [0.014, 0.5], [0.019, 0.68]];
+const HAIR_SHELLS: [number, number][] = [[0.003, 0.02], [0.006, 0.3], [0.009, 0.5], [0.012, 0.68]];
 
 /**
  * Hair as stacked shells: the innermost is solid, outer ones keep progressively fewer strands,
@@ -599,7 +599,6 @@ export function Stage({ body, garments, focus = 'full', autoRotate = true, inter
         gl={{ antialias: true }}
         onCreated={({ gl, scene }) => {
           gl.localClippingEnabled = true;
-          gl.shadowMap.type = THREE.PCFSoftShadowMap;
           // Image-based lighting from a procedural studio room; skipped where the GPU cannot
           // render the required float targets, leaving the direct lights below.
           try {

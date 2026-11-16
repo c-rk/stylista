@@ -1,5 +1,5 @@
 import { router, useLocalSearchParams } from 'expo-router';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { ScrollView, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -29,6 +29,13 @@ export default function BodyEditor() {
   const [draft, setDraft] = useState<BodyParams>(saved);
   const [fitted, setFitted] = useState(true);
   const patch = (p: Partial<BodyParams>) => setDraft((d) => ({ ...d, ...p }));
+  // Refitting the mesh and every garment is too heavy for each slider tick on a phone; the 3D
+  // view follows the sliders at a short delay instead.
+  const [shown, setShown] = useState<BodyParams>(saved);
+  useEffect(() => {
+    const id = setTimeout(() => setShown(draft), 140);
+    return () => clearTimeout(id);
+  }, [draft]);
 
   const save = () => {
     const store = useStore.getState();
@@ -43,7 +50,7 @@ export default function BodyEditor() {
     <View style={styles.root}>
       <View style={styles.stage}>
         <StageBackdrop />
-        <Stage body={draft} garments={fitted ? [] : worn} />
+        <Stage body={shown} garments={fitted ? [] : worn} />
         <View style={[styles.top, { top: insets.top + 10 }]}>
           <IconButton icon="chevron-back" label="Back" onPress={() => router.back()} />
           <IconButton icon="shirt-outline" label="Toggle outfit" active={!fitted} onPress={() => setFitted((f) => !f)} />
