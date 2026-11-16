@@ -1,0 +1,49 @@
+name: Android APK
+
+on:
+  push:
+    branches: ['claude/3d-virtual-try-on-gvgkj2', 'main']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - name: Generate the Android project
+        run: npx expo prebuild --platform android --no-install
+      - name: Build release APK (arm64)
+        working-directory: android
+        run: ./gradlew assembleRelease -PreactNativeArchitectures=arm64-v8a --no-daemon
+      - run: cp android/app/build/outputs/apk/release/app-release.apk stylista.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stylista-apk
+          path: stylista.apk
+      - name: Publish as the latest test build
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: apk-latest
+          name: Stylista test build
+          body: Installable Android build (arm64) of the latest commit. Signed with a debug key, for testing only.
+          files: stylista.apk
+          prerelease: true
+          make_latest: false
