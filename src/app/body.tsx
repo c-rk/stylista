@@ -52,12 +52,17 @@ export default function BodyEditor() {
       <View style={styles.sheet}>
         <ScrollView contentContainerStyle={{ padding: space.xl, paddingBottom: space.xl, gap: space.lg }} showsVerticalScrollIndicator={false}>
           <View>
-            <Text style={type.caption}>{scanned ? 'Capture complete' : 'Your model'}</Text>
+            <Text style={type.caption}>{scanned === '1' ? 'Measured from your capture' : scanned === '0' ? 'Capture incomplete' : 'Your model'}</Text>
             <Text style={[type.title, { marginTop: 4 }]}>{scanned ? 'Fine-tune your shape' : 'Measurements'}</Text>
             <Text style={[type.body, { marginTop: 6, fontSize: 13, lineHeight: 19 }]}>
-              {scanned ? 'Proportions start from your height. Adjust until the model matches you; a tape measure helps.' : 'The model updates as you drag. A tape measure gives the best fit.'}
+              {scanned === '1'
+                ? 'These come from your silhouette. Check them against a tape measure and adjust where needed.'
+                : scanned === '0'
+                  ? 'Your whole body was not inside the outline, so average proportions for your height are shown. Adjust below or capture again.'
+                  : 'The model updates as you drag. A tape measure gives the best fit.'}
             </Text>
           </View>
+          <Slider label="Build" value={draft.gender ?? 0} onChange={(gender) => patch({ gender })} format={(v) => (v < 0.34 ? 'Feminine' : v > 0.66 ? 'Masculine' : 'Neutral')} />
           {FIELDS.map((f) => (
             <Slider
               key={f.key}

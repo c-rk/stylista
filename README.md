@@ -4,8 +4,6 @@
 then adds clothes from a camera photo, the photo library, or the clipboard and views them
 on the model from any angle. All data stays on the device.
 
-![Screens](docs/preview.png)
-
 ## Stack
 
 - Expo SDK 58 / React Native 0.88, TypeScript, Expo Router
@@ -28,44 +26,68 @@ real device. Store builds: `eas build -p ios` / `eas build -p android`.
 
 | Path | Contents |
 | --- | --- |
-| `src/app` | Routes: onboarding, capture, body editor, home, garment editor |
-| `src/screens` | Studio, Wardrobe, Profile, GarmentEditor |
-| `src/three` | `loft.ts` surface skinning, `body.ts` parametric body, `garments.ts` garment templates, `Stage.tsx` viewer |
-| `src/ml` | Inference stage interfaces and their on-device implementations |
-| `src/lib` | Catalog, image persistence and garment texture extraction, units |
-| `src/store` | Persisted app state |
+| `src/app` | Routes: onboarding, capture, body editor, home, garment editor, `dev` harness |
+| `src/screens`, `src/components` | Studio, Wardrobe, Profile, GarmentEditor, framed garment camera |
+| `src/vision` | Pure TypeScript image algorithms: matting, garment scan, body measurement, face alignment, procedural silhouettes |
+| `src/ml` | ONNX Runtime wrappers (native and web) and the analysis pipeline |
+| `src/three/human` | Morphable body, polar body sections, cloth builder, anchors |
+| `src/three` | Stage (viewer), accessories |
+| `assets/body`, `assets/models` | Body mesh data, segmentation and face-landmark networks |
+| `scripts/build_body.py` | Converts MakeHuman CC0 data into `assets/body/body.bin` |
 
-## How it works
+## On-device pipeline
 
-**Body.** Six measurements define elliptical cross-sections (circumference to half-axes via
-Ramanujan's approximation) at anatomical heights. Monotone cubic interpolation between
-them gives the torso, limbs and head, skinned into meshes. A rebuild costs a few thousand
-vertices, so the model follows sliders in real time.
+Nothing leaves the phone. Two bundled networks (9.4 MB total) run through ONNX Runtime; the
+rest is geometry.
 
-**Garments.** Each garment type is a template defined as an offset surface over the same
-body functions, so it refits automatically when measurements change. Sleeve, length,
-looseness and flare are continuous parameters.
+**Body.** MakeHuman CC0 base mesh (13k vertices) with 28 morph targets. Morph weights are
+solved so tape-measure loops on the mesh match the requested chest, waist, hips, shoulders and
+inside leg (within about 0.3 cm, about 15 ms). A fitted top and shorts are always rendered; the
+model is never shown unclothed.
 
-**Photo to texture.** `extractGarmentTexture` estimates the backdrop colour from the image
-border, keys it out, and stretches each row of the garment silhouette to the full texture
-width. The result contains fabric only and is projected onto the template front and back.
-Cluttered backdrops fall back to the raw photo and a dominant colour.
+**Body capture.** Four hands-free poses inside an on-screen outline with head and feet limit
+lines. The front and side frames are segmented, widths and depths are read from the
+silhouettes at anatomical heights and converted to girths. If the person is cut off by the
+frame the app says so and falls back to average proportions.
 
-## Milestone status
+**Face.** FaceMesh landmarks are located on the front frame (crop seeded by the silhouette's
+head box and refined iteratively). Eye and chin landmarks define the projection of the photo
+onto the head and eyeballs; skin and hair colour are sampled from the same frame.
 
-Done: app shell, design system, onboarding, hands-free 4-pose capture flow (voice,
-countdown, upright check), measurement editor, 3D studio (orbit, pinch zoom, inertia,
-per-category framing), wardrobe, saved looks, garment import and editor, local storage,
-data wipe.
+**Background removal.** U2-Netp saliency map, upsampled and snapped to image edges with a
+guided filter, then cleaned by connected components. The garment camera shows a framing
+outline and crops to it before segmentation.
 
-Not yet implemented:
+**Garment scan.** From the matte: type (top, dress, skirt, trousers), torso band per row,
+armpit row, sleeve axes and widths, leg extents, flat-lay versus worn. Output is an RGBA atlas
+(front half and a back half with the neckline closed) plus the silhouette structure.
 
-- Body shape estimation from the captured frames. `bodyEstimator` currently scales average
-  proportions to the entered height; the user fine-tunes with sliders. Frames are stored
-  locally for a silhouette-based regressor behind the same interface.
-- Learned garment segmentation and type classification (current keying is classical and
-  needs a fairly uniform backdrop; type is chosen by the user).
-- Cloud "HD reconstruction" (opt-in). Interface and setting exist; no endpoint configured.
-- Face/skin texture on the avatar, cloth simulation.
-- App icon and splash artwork are still the Expo defaults; bundle id `com.stylista.app`
-  is a placeholder.
+**Draping.** The body is sliced into polar sections (trunk, legs, arms). Cloth rings are those
+sections widened to the photographed half-width at each height and relaxed toward an ellipse
+where the piece stands off the body. Texture coordinates point into the atlas, whose alpha
+trims neckline, hem and straps. Layers are built inside-out and each clears the ones beneath.
+Pieces without a photo use procedural silhouettes through the same path.
+
+## Verified
+
+- Typecheck, lint, iOS and Android JS bundles.
+- Browser build end to end with real product photos: import, background removal, scan,
+  draping, orbit, persistence.
+- Body measurement, segmentation and face alignment on sample photos in Node.
+
+## Not verified / limits
+
+- Not run on a physical device: camera screens, ONNX Runtime native module, speed on Hermes.
+- The back of a garment is inferred from the front photo.
+- A garment photographed on a person is segmented together with the person.
+- Sleeves lying over the torso in the photo are not separated.
+- Shoes and accessories are parametric shapes coloured from the photo, not reconstructions.
+- Skin is a flat tone plus the projected face; hair is a simple cap.
+- Cloud "HD reconstruction" is an opt-in setting with no endpoint configured.
+- App icon and splash are Expo defaults; bundle id `com.stylista.app` is a placeholder.
+
+## Assets and licences
+
+- Body mesh, targets, weights: MakeHuman, CC0.
+- `u2netp.onnx`: U2-Net, Apache-2.0. `face_landmarks.onnx`: MediaPipe FaceMesh, Apache-2.0,
+  converted from the official TFLite file with tf2onnx.

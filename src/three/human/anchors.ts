@@ -7,6 +7,8 @@ export interface Anchors {
   /** Head ellipsoid: centre height/depth and half extents (a: width, b: depth, h: height). */
   head: { cy: number; cz: number; a: number; b: number; h: number };
   eyes: { y: number; z: number; dx: number };
+  /** Lowest point of the face front. */
+  chinY: number;
   neck: { y: number; z: number; r: number };
   hand: Record<-1 | 1, [number, number, number]>;
   foot: Record<-1 | 1, { x: number; y: number; z: number; w: number; h: number; len: number }>;
@@ -48,6 +50,10 @@ export function anchors(model: HumanModel, fit: FittedBody, frame: BodyFrame): A
     ex += Math.abs(pos[v * 3]) / eyeV.length;
   }
   const neck = model.joint(pos, 'neck');
+  const neckY = neck[1];
+  let chinY = Infinity;
+  const frontZ = (head.min[2] + head.max[2]) / 2 + (head.max[2] - head.min[2]) * 0.2;
+  for (const v of seen) if (parts[v * 6 + PART.head] > 128 && pos[v * 3 + 1] > neckY && pos[v * 3 + 2] > frontZ && Math.abs(pos[v * 3]) < 0.02) chinY = Math.min(chinY, pos[v * 3 + 1]);
   const hand = {} as Anchors['hand'];
   const foot = {} as Anchors['foot'];
   for (const sgn of [-1, 1] as const) {
@@ -61,6 +67,7 @@ export function anchors(model: HumanModel, fit: FittedBody, frame: BodyFrame): A
     H: frame.H,
     head: { cy: (head.min[1] + head.max[1]) / 2, cz: (head.min[2] + head.max[2]) / 2, a: (head.max[0] - head.min[0]) / 2, b: (head.max[2] - head.min[2]) / 2, h: (head.max[1] - head.min[1]) / 2 },
     eyes: { y: ey, z: ez, dx: ex },
+    chinY,
     neck: { y: neck[1], z: neck[2], r: frame.trunk.half(neck[1] + 0.02) },
     hand,
     foot,

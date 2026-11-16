@@ -434,6 +434,7 @@ export function buildCloth(frame: BodyFrame, scan: GarmentScan, { layer, size, u
    * One cloth ring around a vertical body part: the body section, widened to the garment's
    * half-width `gh * k`, relaxed toward an ellipse as it stands further off the body.
    */
+  const capFrom = frame.armpitY - 0.01;
   const ring = (key: string, polar: Polar, y: number, py: number, lo: number, hi: number, shrink = 1, claim = true) => {
     const gh = Math.max(1, (hi - lo) / 2);
     const gc = (hi + lo) / 2;
@@ -466,7 +467,10 @@ export function buildCloth(frame: BodyFrame, scan: GarmentScan, { layer, size, u
           for (const d of [-1, 0, 1]) occupied.note('trunk', y, (tj + d + NT) % NT, tr);
         }
       }
-      return [ca + ax * shrink, y, cb + az * shrink, gc + clamp(ax / ch, -0.985, 0.985) * gh, py];
+      // Below the armpits the lookup is held inside the band so side seams stay closed. Above
+      // them it runs free: shoulder caps beyond the band read the photo's own shoulder line.
+      const u = (ax / ch) * 0.985;
+      return [ca + ax * shrink, y, cb + az * shrink, gc + (lower || y < capFrom ? clamp(u, -0.985, 0.985) : u) * gh, py];
     };
   };
 

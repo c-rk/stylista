@@ -94,7 +94,8 @@ function shade(hex: string, kind: 'trim' | 'sole'): string {
 // ---- cloth -----------------------------------------------------------------------------
 
 /** Clearance from the skin per garment class, metres. Also the inside-out build order. */
-const LAYER: Record<string, number> = { base: 0.0008, trousers: 0.002, skirt: 0.003, top: 0.005, dress: 0.005, outerwear: 0.011 };
+const LAYER: Record<string, number> = { base: 0.002, trousers: 0.004, skirt: 0.005, top: 0.007, dress: 0.007, outerwear: 0.013 };
+const BASE_COLOR = '#3A3A44';
 const CLOTH_KINDS: GarmentKind[] = ['top', 'outerwear', 'dress', 'trousers', 'skirt'];
 
 interface ClothItem {
@@ -144,11 +145,14 @@ function SyntheticCloth({ item, cloth }: { item: ClothItem; cloth: Cloth }) {
 }
 
 /** All cloth layers, built inside-out so each one clears those beneath it. */
-function Cloths({ garments, frame, gender }: { garments: Garment[]; frame: BodyFrame; gender: number }) {
+function Cloths({ garments, frame }: { garments: Garment[]; frame: BodyFrame }) {
   const items = useMemo(() => {
     const base = { sleeve: 0, length: 0, fit: 0, flare: 0 };
-    const list: ClothItem[] = [{ id: '_briefs', layer: LAYER.base, color: '#D6D1CB', size: 1, synthetic: syntheticGarment('briefs', base) }];
-    if (gender < 0.6) list.push({ id: '_bra', layer: LAYER.base, color: '#D6D1CB', size: 1, synthetic: syntheticGarment('bra', base) });
+    // The model is never shown unclothed: fitted shorts and a tank are always on underneath.
+    const list: ClothItem[] = [
+      { id: '_shorts', layer: LAYER.base, color: BASE_COLOR, size: 1, synthetic: syntheticGarment('briefs', base) },
+      { id: '_tank', layer: LAYER.base, color: BASE_COLOR, size: 1, synthetic: syntheticGarment('bra', base) },
+    ];
     for (const g of garments) {
       if (!CLOTH_KINDS.includes(g.kind)) continue;
       const layer = LAYER[g.kind];
@@ -156,7 +160,7 @@ function Cloths({ garments, frame, gender }: { garments: Garment[]; frame: BodyF
       else list.push({ id: g.id, layer, color: g.color, size: g.size ?? 1, synthetic: syntheticGarment(g.kind as SyntheticKind, g.shape) });
     }
     return list.sort((a, b) => a.layer - b.layer);
-  }, [garments, gender]);
+  }, [garments]);
 
   const built = useMemo(() => {
     const under = new Occupancy();
@@ -219,10 +223,75 @@ function Hair({ body, model, fit, anchors }: { body: BodyParams; model: HumanMod
   );
 }
 
+/**
+ * The user's face from the front capture, projected onto the front of the head. Opacity fades
+ * toward the sides, the hairline and the jaw so it blends into the skin tone.
+ */
+/** Photo coordinates for a point on the head, from the eye and chin landmarks. */
+function faceMapping(face: NonNullable<BodyParams['face']>, anchors: Anchors) {
+  const { eyes, chinY } = anchors;
+  // The eye line gives scale and roll across the face, eye-to-chin the vertical scale. The eye
+  // further right in the image is the model's +x.
+  const [ea, eb] = face.eyes[0][0] <= face.eyes[1][0] ? face.eyes : [face.eyes[1], face.eyes[0]];
+  const mid = [(ea[0] + eb[0]) / 2, (ea[1] + eb[1]) / 2];
+  const ex = [(eb[0] - ea[0]) / (2 * eyes.dx), (eb[1] - ea[1]) / (2 * eyes.dx)];
+  const drop = eyes.y - chinY;
+  const ey = [(face.chin[0] - mid[0]) / drop, (face.chin[1] - mid[1]) / drop];
+  return { drop, uv: (x: number, y: number): [number, number] => [mid[0] + ex[0] * x + ey[0] * (eyes.y - y), 1 - (mid[1] + ex[1] * x + ey[1] * (eyes.y - y))] };
+}
+
+function FaceDecal({ face, model, fit, anchors }: { face: NonNullable<BodyParams['face']>; model: HumanModel; fit: FittedBody; anchors: Anchors }) {
+  const map = useImageTexture(face.uri);
+  const geometry = useMemo(() => {
+    const { eyes, chinY } = anchors;
+    const { drop, uv: lookup } = faceMapping(face, anchors);
+    const g = setGeometry(model, fit, 'body', (v) => fit.positions[v * 3 + 1] > chinY - 0.03);
+    const p = g.attributes.position, n = g.attributes.normal;
+    const uv = new Float32Array(p.count * 2);
+    const col = new Float32Array(p.count * 4);
+    const ss = (lo: number, hi: number, x: number) => {
+      const t = Math.min(1, Math.max(0, (x - lo) / (hi - lo)));
+      return t * t * (3 - 2 * t);
+    };
+    for (let i = 0; i < p.count; i++) {
+      const down = eyes.y - p.getY(i);
+      uv.set(lookup(p.getX(i), p.getY(i)), i * 2);
+      // t: -1 around the hairline, 0 at the eyes, 1 at the chin.
+      const t = down / drop;
+      const alpha = ss(0.2, 0.62, n.getZ(i)) * ss(-0.78, -0.5, t) * (1 - ss(0.94, 1.12, t));
+      col.set([1, 1, 1, alpha], i * 4);
+    }
+    g.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+    g.setAttribute('color', new THREE.BufferAttribute(col, 4));
+    return g;
+  }, [face, model, fit, anchors]);
+  useDisposable(useMemo(() => [geometry], [geometry]));
+  if (!map) return null;
+  return (
+    <mesh geometry={geometry} renderOrder={1}>
+      <meshStandardMaterial map={map} vertexColors transparent depthWrite={false} polygonOffset polygonOffsetFactor={-2} polygonOffsetUnits={-2} roughness={0.6} />
+    </mesh>
+  );
+}
+
 function Body({ body, model, fit, anchors }: { body: BodyParams; model: HumanModel; fit: FittedBody; anchors: Anchors }) {
-  const geo = useMemo(() => ({ skin: setGeometry(model, fit, 'body'), eyes: setGeometry(model, fit, 'eyes') }), [model, fit]);
+  const face = body.face;
+  const geo = useMemo(() => {
+    const eyes = setGeometry(model, fit, 'eyes');
+    if (face) {
+      // With a face photo the eyeballs show the user's own eyes from the same projection.
+      const { uv } = faceMapping(face, anchors);
+      const p = eyes.attributes.position;
+      const arr = new Float32Array(p.count * 2);
+      for (let i = 0; i < p.count; i++) arr.set(uv(p.getX(i), p.getY(i)), i * 2);
+      eyes.setAttribute('uv', new THREE.BufferAttribute(arr, 2));
+    }
+    return { skin: setGeometry(model, fit, 'body'), eyes };
+  }, [model, fit, face, anchors]);
   useDisposable(useMemo(() => Object.values(geo), [geo]));
-  const eye = useImageTexture(useAssetUri(require('../../assets/body/eye.png')));
+  const generic = useImageTexture(useAssetUri(require('../../assets/body/eye.png')));
+  const photo = useImageTexture(face?.uri);
+  const eye = face ? photo : generic;
   return (
     <group>
       <mesh geometry={geo.skin}>
@@ -231,6 +300,7 @@ function Body({ body, model, fit, anchors }: { body: BodyParams; model: HumanMod
       <mesh geometry={geo.eyes}>
         <meshStandardMaterial key={eye ? 't' : 'c'} color="#ffffff" map={eye} roughness={0.15} />
       </mesh>
+      {body.face && <FaceDecal face={body.face} model={model} fit={fit} anchors={anchors} />}
       {body.hair !== 'none' && <Hair body={body} model={model} fit={fit} anchors={anchors} />}
     </group>
   );
@@ -243,7 +313,7 @@ function Figure({ body, model, garments }: { body: BodyParams; model: HumanModel
   return (
     <group>
       <Body body={body} model={model} fit={fit} anchors={anch} />
-      <Cloths garments={garments} frame={frame} gender={body.gender ?? 0.5} />
+      <Cloths garments={garments} frame={frame} />
       {garments
         .filter((g) => !CLOTH_KINDS.includes(g.kind))
         .map((g) => (

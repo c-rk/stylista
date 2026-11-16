@@ -104,7 +104,7 @@ export function Profile() {
         <Row
           icon="sparkles-outline"
           title="HD reconstruction"
-          note={hdReconstructor.available ? 'Sends a garment photo to a server for a detailed 3D mesh. The photo is deleted after processing.' : 'Cloud-assisted garment meshes. Not available in this build; all processing runs on device.'}
+          note={hdReconstructor.available ? 'Optional. Sends a garment photo to a server for a detailed 3D mesh. The photo is deleted after processing.' : 'Optional cloud processing. Off: background removal, body measurement and draping all run on this device.'}
           right={
             <Switch
               value={settings.hdCloud && hdReconstructor.available}

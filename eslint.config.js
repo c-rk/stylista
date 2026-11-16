@@ -12,4 +12,9 @@ module.exports = defineConfig([
     files: ['src/three/**/*.tsx'],
     rules: { 'react/no-unknown-property': 'off' },
   },
+  {
+    // Numeric kernels use comma-grouped accumulator updates.
+    files: ['src/vision/**/*.ts', 'src/three/**/*.ts'],
+    rules: { '@typescript-eslint/no-unused-expressions': 'off', 'no-unused-expressions': 'off' },
+  },
 ]);

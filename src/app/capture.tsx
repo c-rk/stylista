@@ -14,12 +14,12 @@ import { Button, IconButton, IconName, Press, Slider, StageBackdrop } from '@/co
 import { bodyFromHeight } from '@/lib/catalog';
 import { persistImage } from '@/lib/images';
 import { formatLength } from '@/lib/units';
-import { bodyEstimator } from '@/ml';
+import { analyzeBody } from '@/ml';
 import { useStore } from '@/store';
 import { colors, fonts, radius, space, type } from '@/theme';
 
 const POSES = [
-  { id: 'front', title: 'Face the camera', say: 'Stand inside the outline, facing the camera, arms slightly away from your body.' },
+  { id: 'front', title: 'Face the camera', say: 'Step back until your whole body fits inside the outline. Face the camera, arms slightly away from your sides.' },
   { id: 'left', title: 'Turn to your left', say: 'Now turn a quarter turn to your left.' },
   { id: 'back', title: 'Face away', say: 'Turn again so your back faces the camera.' },
   { id: 'right', title: 'One more quarter turn', say: 'One more quarter turn.' },
@@ -28,10 +28,10 @@ const POSES = [
 const TIPS: { icon: IconName; title: string; body: string }[] = [
   { icon: 'phone-portrait-outline', title: 'Prop your phone upright', body: 'Waist height, against a shelf or wall, about 2.5 m away.' },
   { icon: 'shirt-outline', title: 'Wear fitted clothes', body: 'Close-fitting clothing gives the most accurate shape.' },
-  { icon: 'sunny-outline', title: 'Stand in even light', body: 'Whole body in frame, plain background if possible.' },
+  { icon: 'scan-outline', title: 'Fill the outline', body: 'Step back until you fit head to toe between the two guide lines.' },
 ];
 
-const STAGES = ['Reading your captures', 'Estimating proportions', 'Sculpting your model'];
+const STAGES = ['Separating you from the background', 'Measuring your silhouette', 'Sculpting your model'];
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 function Silhouette() {
@@ -89,15 +89,17 @@ export default function Capture() {
   const finish = async (captures: string[]) => {
     setPhase('processing');
     say('All done. Building your model.');
-    progress.value = withTiming(1, { duration: 2600 });
-    for (let i = 0; i < STAGES.length; i++) {
-      setStage(i);
-      await wait(870);
-    }
+    progress.value = withTiming(0.9, { duration: 6000 });
+    setStage(0);
     const store = useStore.getState();
+    const ticker = setInterval(() => setStage((n) => Math.min(STAGES.length - 1, n + 1)), 1500);
+    const result = await analyzeBody(captures, height, store.body);
+    clearInterval(ticker);
+    progress.value = withTiming(1, { duration: 250 });
     store.setCaptures(captures);
-    store.setBody(await bodyEstimator.estimate({ captures, heightCm: height, current: store.body }));
-    router.replace({ pathname: '/body', params: { onboarding: '1', scanned: '1' } });
+    store.setBody({ ...result.body, face: result.face });
+    await wait(300);
+    router.replace({ pathname: '/body', params: { onboarding: '1', scanned: result.measured ? '1' : '0' } });
   };
 
   // Hands-free sequence: voice prompt, countdown, shutter, repeat for each pose.
@@ -122,7 +124,7 @@ export default function Capture() {
         if (Platform.OS !== 'web') Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
         try {
           const shot = await camera.current?.takePictureAsync({ quality: 0.85, skipProcessing: false });
-          if (shot?.uri) captures.push(await persistImage(shot.uri, 'captures', 1280));
+          if (shot?.uri) captures.push(await persistImage(shot.uri, 'captures', i === 0 ? 2048 : 1280));
         } catch {
           // A failed frame does not abort the session.
         }
@@ -169,6 +171,13 @@ export default function Capture() {
         <CameraView ref={camera} style={StyleSheet.absoluteFill} facing="front" mirror onCameraReady={() => setCameraReady(true)} />
         <View pointerEvents="none" style={[styles.outline, { top: insets.top + 84, bottom: insets.bottom + 96 }]}>
           <Silhouette />
+          {/* Boundary: the whole body has to sit between these two lines to be measured. */}
+          <View style={[styles.limit, { top: 0 }]}>
+            <Text style={styles.limitText}>Head below this line</Text>
+          </View>
+          <View style={[styles.limit, { bottom: 0 }]}>
+            <Text style={styles.limitText}>Feet above this line</Text>
+          </View>
         </View>
         <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFill, { backgroundColor: '#fff' }, flashStyle]} />
         <View style={[styles.camTop, { top: insets.top + 10 }]}>
@@ -257,6 +266,8 @@ const styles = StyleSheet.create({
   link: { alignSelf: 'center', paddingVertical: 10 },
   linkText: { fontFamily: fonts.medium, fontSize: 14, color: colors.textDim },
   outline: { position: 'absolute', left: 30, right: 30 },
+  limit: { position: 'absolute', left: -18, right: -18, borderTopWidth: 2, borderColor: colors.accent, alignItems: 'center' },
+  limitText: { fontFamily: fonts.medium, fontSize: 11, color: colors.accentInk, backgroundColor: colors.accent, paddingHorizontal: 8, paddingVertical: 2, borderBottomLeftRadius: 6, borderBottomRightRadius: 6, overflow: 'hidden' },
   camTop: { position: 'absolute', left: space.lg, right: space.lg, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   prompt: { backgroundColor: 'rgba(10,10,13,0.72)', paddingHorizontal: 18, paddingVertical: 10, borderRadius: radius.pill },
   promptText: { fontFamily: fonts.semibold, fontSize: 15, color: colors.text },

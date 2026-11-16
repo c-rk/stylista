@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-require-imports -- Metro resolves bundled binary assets through require(). */
 import { Asset } from 'expo-asset';
 import { useEffect, useState } from 'react';
 
