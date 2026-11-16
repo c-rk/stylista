@@ -53,6 +53,7 @@ SETS = {
     'skirt': ['helper-skirt'],
     'hair': ['helper-hair'],
     'eyes': ['helper-l-eye', 'helper-r-eye'],
+    'lashes': ['helper-l-eyelashes-1', 'helper-l-eyelashes-2', 'helper-r-eyelashes-1', 'helper-r-eyelashes-2'],
 }
 for name, groups in SETS.items():
     remap, vmap, uv, idx = {}, [], [], []

@@ -4,6 +4,7 @@ import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeom
 
 import type { Garment } from '@/types';
 import type { Anchors } from './human/anchors';
+import { NT, Polar } from './human/cloth';
 import { lerp, loft, Ring, span } from './loft';
 
 export type PartMaterial = 'main' | 'trim' | 'sole' | 'lens' | 'metal';
@@ -12,35 +13,66 @@ export interface Part {
   material: PartMaterial;
 }
 
-/** Ellipsoid with a flattened underside. */
-function shoeShell(f: Anchors['foot'][1], scale: number): THREE.BufferGeometry {
-  const g = new THREE.SphereGeometry(1, 22, 14);
-  const p = g.attributes.position;
-  for (let i = 0; i < p.count; i++) {
-    const y = p.getY(i), z = p.getZ(i);
-    const rise = y > 0 ? 1 - 0.4 * Math.max(0, z) : 0.999;
-    p.setXYZ(i, p.getX(i) * f.w * scale, y * f.h * scale * rise, z * f.len * (scale + 0.06));
+/**
+ * Shoe built around the wearer's own foot: the foot's cross-sections along its length, widened
+ * by a lining clearance, with a flat base and rounded toe and heel.
+ */
+function shoeShell(feet: Polar, grow: number, floor: number, top: number): THREE.BufferGeometry {
+  const rings = feet.rings;
+  const cols = NT + 1;
+  const pos = new Float32Array(rings * cols * 3);
+  for (let i = 0; i < rings; i++) {
+    const z = feet.t0 + i * feet.step;
+    // Round off the toe and the heel.
+    const end = Math.min(i, rings - 1 - i) / 3;
+    const cap = end >= 1 ? 1 : 0.55 + 0.45 * Math.sqrt(Math.max(0, end));
+    for (let j = 0; j <= NT; j++) {
+      const a = ((j % NT) / NT) * Math.PI * 2;
+      const r = (feet.radius(z, j % NT) + grow) * cap;
+      const k = (i * cols + j) * 3;
+      pos[k] = feet.centreA(z) + r * Math.cos(a);
+      pos[k + 1] = Math.min(top, Math.max(floor, feet.centreB(z) + r * Math.sin(a)));
+      pos[k + 2] = z + (i === 0 ? -grow : i === rings - 1 ? grow : 0);
+    }
   }
+  const idx: number[] = [];
+  for (let i = 0; i < rings - 1; i++)
+    for (let j = 0; j < NT; j++) {
+      const p = i * cols + j, q = p + cols;
+      idx.push(p, p + 1, q, p + 1, q + 1, q);
+    }
+  // Close toe and heel with fans.
+  for (const i of [0, rings - 1]) {
+    const c = pos.length / 3 + (i ? 1 : 0);
+    for (let j = 0; j < NT; j++) idx.push(...(i ? [i * cols + j, c, i * cols + j + 1] : [i * cols + j, i * cols + j + 1, c]));
+  }
+  const withCaps = new Float32Array(pos.length + 6);
+  withCaps.set(pos);
+  for (const [n, i] of [[0, 0], [1, rings - 1]]) {
+    const z = feet.t0 + i * feet.step;
+    withCaps.set([feet.centreA(z), Math.max(floor, feet.centreB(z)), z + (i ? grow : -grow)], pos.length + n * 3);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(withCaps, 3));
+  g.setIndex(idx);
   g.computeVertexNormals();
-  g.translate(f.x, f.h * scale, f.z);
   return g;
 }
 
 function shoes(a: Anchors, g: Garment): Part[] {
   const parts: Part[] = [];
+  const sole = 0.012 * (a.H / 1.7);
   for (const side of [1, -1] as const) {
-    const f = a.foot[side];
-    parts.push({ geometry: shoeShell(f, g.kind === 'boot' ? 1.24 : 1.2), material: 'main' });
-    const sole = new THREE.SphereGeometry(1, 20, 10);
-    sole.scale(f.w * 1.24, 0.0075 * a.H, f.len * 1.28);
-    sole.translate(f.x, 0.005 * a.H, f.z);
-    parts.push({ geometry: sole, material: 'sole' });
+    const feet = a.feet[side];
+    parts.push({ geometry: shoeShell(feet, 0.006, sole * 0.6, 1), material: 'main' });
+    // Sole: the same outline, slightly wider, between the ground and the upper.
+    parts.push({ geometry: shoeShell(feet, 0.011, 0, sole), material: 'sole' });
     if (g.kind === 'boot') {
       // Shaft: starts above the ankle bone, where the leg section no longer includes the foot.
       const top = lerp(0.12 * a.H, a.kneeY - 0.03 * a.H, g.shape.length);
       parts.push({
         geometry: loft(
-          span(0.062 * a.H, top, 0.01 * a.H).map((y): Ring => {
+          span(0.06 * a.H, top, 0.01 * a.H).map((y): Ring => {
             const l = a.leg(side, y);
             return { y, cx: l.cx, cz: l.cz, a: l.a + 0.008, b: l.b + 0.008 };
           }),

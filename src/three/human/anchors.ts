@@ -7,6 +7,8 @@ export interface Anchors {
   /** Head ellipsoid: centre height/depth and half extents (a: width, b: depth, h: height). */
   head: { cy: number; cz: number; a: number; b: number; h: number };
   eyes: { y: number; z: number; dx: number };
+  /** Eyeball centres and radius. */
+  eyeballs: { centre: [number, number, number]; radius: number }[];
   /** Lowest point of the face front. */
   chinY: number;
   neck: { y: number; z: number; r: number };
@@ -15,6 +17,7 @@ export interface Anchors {
   /** Leg cross-section at a height: centre and half extents. */
   leg: (side: -1 | 1, y: number) => { cx: number; cz: number; a: number; b: number };
   kneeY: number;
+  feet: BodyFrame['feet'];
 }
 
 export function anchors(model: HumanModel, fit: FittedBody, frame: BodyFrame): Anchors {
@@ -49,6 +52,14 @@ export function anchors(model: HumanModel, fit: FittedBody, frame: BodyFrame): A
     ez = Math.max(ez, pos[v * 3 + 2]);
     ex += Math.abs(pos[v * 3]) / eyeV.length;
   }
+  const eyeballs = [-1, 1].map((sgn) => {
+    const vs = eyeV.filter((v) => pos[v * 3] * sgn > 0);
+    const c: [number, number, number] = [0, 0, 0];
+    for (const v of vs) for (let k = 0; k < 3; k++) c[k] += pos[v * 3 + k] / vs.length;
+    let r = 0;
+    for (const v of vs) r += Math.hypot(pos[v * 3] - c[0], pos[v * 3 + 1] - c[1], pos[v * 3 + 2] - c[2]) / vs.length;
+    return { centre: c, radius: r };
+  });
   const neck = model.joint(pos, 'neck');
   const neckY = neck[1];
   let chinY = Infinity;
@@ -67,6 +78,7 @@ export function anchors(model: HumanModel, fit: FittedBody, frame: BodyFrame): A
     H: frame.H,
     head: { cy: (head.min[1] + head.max[1]) / 2, cz: (head.min[2] + head.max[2]) / 2, a: (head.max[0] - head.min[0]) / 2, b: (head.max[2] - head.min[2]) / 2, h: (head.max[1] - head.min[1]) / 2 },
     eyes: { y: ey, z: ez, dx: ex },
+    eyeballs,
     chinY,
     neck: { y: neck[1], z: neck[2], r: frame.trunk.half(neck[1] + 0.02) },
     hand,
@@ -76,5 +88,6 @@ export function anchors(model: HumanModel, fit: FittedBody, frame: BodyFrame): A
       return { cx: p.centreA(y), cz: p.centreB(y), a: p.half(y), b: p.depthHalf(y) };
     },
     kneeY: model.joint(pos, 'l-knee')[1],
+    feet: frame.feet,
   };
 }

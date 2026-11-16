@@ -50,6 +50,7 @@
     "@types/three": "^0.187.0",
     "eslint": "^9.0.0",
     "eslint-config-expo": "~58.0.4",
+    "patch-package": "^8.0.1",
     "typescript": "~6.0.3"
   },
   "scripts": {
@@ -59,7 +60,7 @@
     "web": "expo start --web",
     "lint": "expo lint",
     "typecheck": "tsc --noEmit",
-    "postinstall": "node scripts/copy-ort.js"
+    "postinstall": "patch-package && node scripts/copy-ort.js"
   },
   "private": true
 }

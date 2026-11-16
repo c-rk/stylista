@@ -26,7 +26,10 @@ const CTOR: Record<string, new (b: ArrayBuffer, o: number, l: number) => Typed> 
   uint8: Uint8Array,
 };
 
-export type MeshSet = 'body' | 'tights' | 'skirt' | 'hair' | 'eyes';
+export type MeshSet = 'body' | 'tights' | 'skirt' | 'hair' | 'eyes' | 'lashes';
+
+/** How far the arms are lowered from the mesh's rest A-pose, radians. */
+const ARM_DROP = 0.4;
 export const PART = { torso: 0, head: 1, armL: 2, armR: 3, legL: 4, legR: 5 } as const;
 
 export interface FittedBody {
@@ -192,6 +195,7 @@ export class HumanModel {
       pos[i + 1] = (pos[i + 1] - r.ground) * s;
       pos[i + 2] *= s;
     }
+    this.relax(pos);
     const cm = (m: number) => Math.round(m * 1000) / 10;
     return {
       positions: pos,
@@ -199,6 +203,29 @@ export class HumanModel {
       scale: s,
       achieved: { height: p.height, chest: cm(v.chest), waist: cm(v.waist), hips: cm(v.hips), shoulders: cm(v.shoulders), inseam: cm(v.inseam) },
     };
+  }
+
+  /**
+   * Lowers the arms from the rest A-pose to a natural standing pose: each vertex rotates about
+   * its shoulder joint in the frontal plane, weighted by its arm skinning weight.
+   */
+  private relax(pos: Float32Array) {
+    const parts = this.array('parts') as Uint8Array;
+    for (const [part, name] of [[PART.armL, 'l-shoulder'], [PART.armR, 'r-shoulder']] as const) {
+      const [jx, jy] = this.joint(pos, name);
+      // Lowering means rotating toward the body: clockwise for the +x arm seen from the front.
+      const angle = (jx > 0 ? -1 : 1) * ARM_DROP;
+      for (let v = 0; v < this.n; v++) {
+        const w = parts[v * 6 + part] / 255;
+        if (!w) continue;
+        // Ease the weight so the shoulder cap bends smoothly instead of creasing.
+        const a = angle * w * w * (3 - 2 * w);
+        const c = Math.cos(a), s = Math.sin(a);
+        const x = pos[v * 3] - jx, y = pos[v * 3 + 1] - jy;
+        pos[v * 3] = jx + x * c - y * s;
+        pos[v * 3 + 1] = jy + x * s + y * c;
+      }
+    }
   }
 
   /** Smooth per-base-vertex normals for one mesh set (shared across UV seams). */

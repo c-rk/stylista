@@ -14,7 +14,7 @@ import type { GarmentScan, Limb } from '@/vision/garment';
 import { SAMPLES } from '@/vision/garment';
 import { FittedBody, HumanModel, PART } from './model';
 
-const NT = 56;
+export const NT = 72;
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
 const smoothstep = (a: number, b: number, x: number) => {
   const t = clamp((x - a) / (b - a), 0, 1);
@@ -130,7 +130,8 @@ export class Polar {
       this.ca[ring] = this.ca[src];
       this.cb[ring] = this.cb[src];
     }
-    // Light smoothing along the axis and around the ring.
+    // Smoothing along the axis and around the ring.
+    for (let pass = 0; pass < (convex ? 3 : 1); pass++) {
     const copy = this.r.slice();
     for (let ring = 0; ring < this.rings; ring++) {
       const up = Math.min(this.rings - 1, ring + 1), dn = Math.max(0, ring - 1);
@@ -138,6 +139,7 @@ export class Polar {
         const l = (j + NT - 1) % NT, rj = (j + 1) % NT;
         this.r[ring * NT + j] = (copy[ring * NT + j] * 4 + copy[up * NT + j] + copy[dn * NT + j] + copy[ring * NT + l] + copy[ring * NT + rj]) / 8;
       }
+    }
     }
     for (let ring = 0; ring < this.rings; ring++) {
       let ha = 0, hb = 0;
@@ -234,6 +236,8 @@ export interface BodyFrame {
   trunk: Polar;
   legs: Record<-1 | 1, Polar>;
   arms: Record<-1 | 1, ArmFrame>;
+  /** Each foot sliced along its length: axis coordinate is z, section plane is (x, y). */
+  feet: Record<-1 | 1, Polar>;
 }
 
 const sideName = (model: HumanModel, sgn: number) => (sgn * model.meta.leftSign > 0 ? 'l' : 'r');
@@ -262,7 +266,7 @@ export function bodyFrame(model: HumanModel, fit: FittedBody): BodyFrame {
     const a = vmap[idx[k]], b = vmap[idx[k + 1]], c = vmap[idx[k + 2]];
     const armW = Math.max(arm(a), arm(b), arm(c));
     // The trunk keeps the shoulder caps: arm triangles that lie inboard of the shoulder joints.
-    const cap = Math.max(Math.abs(pos[a * 3]), Math.abs(pos[b * 3]), Math.abs(pos[c * 3])) < capX && Math.min(pos[a * 3 + 1], pos[b * 3 + 1], pos[c * 3 + 1]) > shoulderY - 0.09 * H;
+    const cap = Math.max(Math.abs(pos[a * 3]), Math.abs(pos[b * 3]), Math.abs(pos[c * 3])) < capX && Math.min(pos[a * 3 + 1], pos[b * 3 + 1], pos[c * 3 + 1]) > shoulderY - 0.055 * H;
     if (armW < 110 || cap) {
       trunkTris.push(a, b, c);
       const xs = pos[a * 3] + pos[b * 3] + pos[c * 3];
@@ -280,8 +284,22 @@ export function bodyFrame(model: HumanModel, fit: FittedBody): BodyFrame {
   const trunk = new Polar(0.03, neckY + 0.05, STEP).build(yxz, trunkTris, true);
   const legs = {} as BodyFrame['legs'];
   const arms = {} as BodyFrame['arms'];
+  const feet = {} as BodyFrame['feet'];
+  const zxy = new Float32Array(pos.length);
+  for (let i = 0; i < pos.length; i += 3) (zxy[i] = pos[i + 2]), (zxy[i + 1] = pos[i]), (zxy[i + 2] = pos[i + 1]);
   for (const sgn of [-1, 1] as const) {
     legs[sgn] = new Polar(0.03, crotchY + 0.06, STEP).build(yxz, legTris[sgn]);
+    {
+      const tris: number[] = [];
+      let z0 = Infinity, z1 = -Infinity;
+      const lt = legTris[sgn];
+      for (let k = 0; k < lt.length; k += 3) {
+        if (Math.max(pos[lt[k] * 3 + 1], pos[lt[k + 1] * 3 + 1], pos[lt[k + 2] * 3 + 1]) > 0.07 * H) continue;
+        tris.push(lt[k], lt[k + 1], lt[k + 2]);
+        for (let c = 0; c < 3; c++) (z0 = Math.min(z0, pos[lt[k + c] * 3 + 2])), (z1 = Math.max(z1, pos[lt[k + c] * 3 + 2]));
+      }
+      feet[sgn] = new Polar(z0 + 0.004, z1 - 0.004, 0.008).build(zxy, tris, true);
+    }
     const s = sideName(model, sgn);
     const origin = new THREE.Vector3(...model.joint(pos, `${s}-shoulder`));
     const wrist = new THREE.Vector3(...model.joint(pos, `${s}-hand`));
@@ -301,7 +319,7 @@ export function bodyFrame(model: HumanModel, fit: FittedBody): BodyFrame {
     arms[sgn] = { origin, d, u, v, length, polar: new Polar(-0.075, length, STEP).build(local, armTris[sgn]) };
   }
   const bustY = meanY(L['bust-circ']);
-  return { H, waistY: meanY(L['waist-circ']), hipY: meanY(L['hips-circ']), bustY, crotchY, shoulderY, armpitY: shoulderY - 0.072 * H, neckY, trunk, legs, arms };
+  return { H, waistY: meanY(L['waist-circ']), hipY: meanY(L['hips-circ']), bustY, crotchY, shoulderY, armpitY: shoulderY - 0.072 * H, neckY, trunk, legs, arms, feet };
 }
 
 /**
@@ -425,7 +443,7 @@ export function buildCloth(frame: BodyFrame, scan: GarmentScan, { layer, size, u
         tris.push(a, b, a + 1, a + 1, b, b + 1);
       }
   };
-  const levels = (lo: number, hi: number, step = 0.0125) => {
+  const levels = (lo: number, hi: number, step = 0.009) => {
     const n = Math.max(2, Math.ceil((hi - lo) / step) + 1);
     return Array.from({ length: n }, (_, i) => lo + ((hi - lo) * i) / (n - 1));
   };
@@ -470,7 +488,7 @@ export function buildCloth(frame: BodyFrame, scan: GarmentScan, { layer, size, u
       // Below the armpits the lookup is held inside the band so side seams stay closed. Above
       // them it runs free: shoulder caps beyond the band read the photo's own shoulder line.
       const u = (ax / ch) * 0.985;
-      return [ca + ax * shrink, y, cb + az * shrink, gc + (lower || y < capFrom ? clamp(u, -0.985, 0.985) : u) * gh, py];
+      return [ca + ax * shrink, y, cb + az * shrink, gc + (lower || tight || y < capFrom ? clamp(u, -0.985, 0.985) : u) * gh, py];
     };
   };
 
@@ -553,6 +571,12 @@ export function buildCloth(frame: BodyFrame, scan: GarmentScan, { layer, size, u
     normal[i + 1] /= l;
     normal[i + 2] /= l;
   }
+  // Second UV set at thread scale (about 5 mm per tile) for the weave normal map.
+  const thread = new Float32Array(UV.length);
+  for (let i = 0; i < UV.length / 2; i++) {
+    thread[i * 2] = (position[i * 3] + position[i * 3 + 2]) * 190;
+    thread[i * 2 + 1] = position[i * 3 + 1] * 190;
+  }
   const make = (isBack: boolean) => {
     const index: number[] = [];
     for (let t = 0; t < tris.length; t += 3) {
@@ -568,6 +592,7 @@ export function buildCloth(frame: BodyFrame, scan: GarmentScan, { layer, size, u
     g.setAttribute('position', new THREE.BufferAttribute(position, 3));
     g.setAttribute('normal', new THREE.BufferAttribute(normal, 3));
     g.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+    g.setAttribute('uv1', new THREE.BufferAttribute(thread, 2));
     g.setIndex(index);
     return g;
   };

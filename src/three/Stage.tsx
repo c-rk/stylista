@@ -4,17 +4,18 @@
  */
 /* eslint-disable react-hooks/immutability, react-hooks/refs */
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
-import { Asset } from 'expo-asset';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { PanResponder, StyleProp, StyleSheet, View, ViewStyle } from 'react-native';
 import * as THREE from 'three';
+import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 
 import type { BodyParams, Garment, GarmentKind } from '@/types';
 import { SyntheticGarment, syntheticGarment, SyntheticKind } from '@/vision/synthetic';
 import { buildAccessory } from './garments';
 import { Anchors, anchors as bodyAnchors } from './human/anchors';
 import { bodyFrame, BodyFrame, buildCloth, Cloth, Occupancy } from './human/cloth';
-import { setGeometry } from './human/geometry';
+import { setGeometry, skinColors } from './human/geometry';
+import { loft, Ring } from './loft';
 import { useHuman } from './human/load';
 import type { FittedBody, HumanModel } from './human/model';
 
@@ -70,19 +71,6 @@ function useImageTexture(uri?: string, mipmaps = true): THREE.Texture | null {
   return uri && loaded?.uri === uri ? loaded.tex : null;
 }
 
-function useAssetUri(module: number): string | undefined {
-  const [uri, setUri] = useState<string>();
-  useEffect(() => {
-    let alive = true;
-    const asset = Asset.fromModule(module);
-    asset.downloadAsync().then(() => alive && setUri(asset.localUri ?? asset.uri), () => {});
-    return () => {
-      alive = false;
-    };
-  }, [module]);
-  return uri;
-}
-
 function shade(hex: string, kind: 'trim' | 'sole'): string {
   const c = new THREE.Color(hex);
   const hsl = { h: 0, s: 0, l: 0 };
@@ -121,12 +109,37 @@ function dataTexture(s: SyntheticGarment): THREE.DataTexture {
   return t;
 }
 
+const WEAVE_SCALE = new THREE.Vector2(0.35, 0.35);
+let weaveTexture: THREE.DataTexture | undefined;
+/** Tiling normal map of a plain weave; read through the cloth's second UV set at thread scale. */
+function weaveNormals(): THREE.DataTexture {
+  if (weaveTexture) return weaveTexture;
+  const n = 32;
+  const height = (x: number, y: number) => Math.max(Math.sin((x / n) * Math.PI * 4) * 0.5 + 0.5, Math.sin((y / n) * Math.PI * 4 + Math.PI * Math.round(x / 8)) * 0.5 + 0.5);
+  const data = new Uint8Array(n * n * 4);
+  for (let y = 0; y < n; y++)
+    for (let x = 0; x < n; x++) {
+      const dx = height(x + 1, y) - height(x - 1, y), dy = height(x, y + 1) - height(x, y - 1);
+      const l = Math.hypot(dx, dy, 1);
+      data.set([Math.round((-dx / l) * 127 + 128), Math.round((-dy / l) * 127 + 128), Math.round((1 / l) * 127 + 128), 255], (y * n + x) * 4);
+    }
+  const t = new THREE.DataTexture(data, n, n, THREE.RGBAFormat);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  t.magFilter = THREE.LinearFilter;
+  t.minFilter = THREE.LinearMipmapLinearFilter;
+  t.generateMipmaps = true;
+  t.channel = 1;
+  t.needsUpdate = true;
+  return (weaveTexture = t);
+}
+
 function ClothSurface({ cloth, map, color }: { cloth: Cloth; map: THREE.Texture; color: string }) {
+  const weave = weaveNormals();
   return (
     <group>
       {[cloth.front, cloth.back].map((g, i) => (
-        <mesh key={i} geometry={g}>
-          <meshStandardMaterial map={map} color={color} alphaTest={0.5} roughness={0.86} side={THREE.DoubleSide} />
+        <mesh key={i} geometry={g} castShadow receiveShadow>
+          <meshPhysicalMaterial map={map} color={color} alphaTest={0.5} roughness={0.92} sheen={0.18} sheenRoughness={0.7} sheenColor="#ffffff" normalMap={weave} normalScale={WEAVE_SCALE} side={THREE.DoubleSide} />
         </mesh>
       ))}
     </group>
@@ -187,7 +200,7 @@ function Accessory({ garment, anchors }: { garment: Garment; anchors: Anchors })
   return (
     <group>
       {parts.map((p, i) => (
-        <mesh key={i} geometry={p.geometry}>
+        <mesh key={i} geometry={p.geometry} castShadow receiveShadow>
           {p.material === 'main' && <meshStandardMaterial color={garment.color} roughness={0.8} side={THREE.DoubleSide} />}
           {p.material === 'trim' && <meshStandardMaterial color={trim} roughness={0.7} />}
           {p.material === 'sole' && <meshStandardMaterial color={sole} roughness={0.8} />}
@@ -201,32 +214,102 @@ function Accessory({ garment, anchors }: { garment: Garment; anchors: Anchors })
 
 // ---- body ------------------------------------------------------------------------------
 
-function Hair({ body, model, fit, anchors }: { body: BodyParams; model: HumanModel; fit: FittedBody; anchors: Anchors }) {
-  const { cy, cz, b, h } = anchors.head;
+let strandTexture: THREE.DataTexture | undefined;
+/** Vertical strand pattern: alpha thins the outer shells into wisps, rgb varies strand tone. */
+function strands(): THREE.DataTexture {
+  if (strandTexture) return strandTexture;
+  const w = 512, h = 4;
+  const data = new Uint8Array(w * h * 4);
+  let seed = 7;
+  const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+  const cover = Array.from({ length: w }, rnd), tone = Array.from({ length: w }, rnd);
+  for (let x = 0; x < w; x++) {
+    const a = (cover[x] + cover[(x + 1) % w]) / 2;
+    const t = 0.62 + 0.38 * ((tone[x] + tone[(x + 1) % w] + tone[(x + 2) % w]) / 3);
+    for (let y = 0; y < h; y++) data.set([t * 255, t * 255, t * 255, a * 255], (y * w + x) * 4);
+  }
+  const t = new THREE.DataTexture(data, w, h, THREE.RGBAFormat);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  t.magFilter = THREE.LinearFilter;
+  t.minFilter = THREE.LinearFilter;
+  t.needsUpdate = true;
+  return (strandTexture = t);
+}
+
+/** Shell lifts off the scalp (metres at 1.7 m stature) and the strand coverage cut for each. */
+const HAIR_SHELLS: [number, number][] = [[0.004, 0.02], [0.009, 0.3], [0.014, 0.5], [0.019, 0.68]];
+
+/**
+ * Hair as stacked shells: the innermost is solid, outer ones keep progressively fewer strands,
+ * which gives volume and a soft outline. Long hair adds sheets falling behind the shoulders.
+ */
+function Hair({ body, model, fit, anchors, frame }: { body: BodyParams; model: HumanModel; fit: FittedBody; anchors: Anchors; frame: BodyFrame }) {
+  const { cy, cz, a, b, h } = anchors.head;
   const long = body.hair === 'long';
-  const { geometry, plane } = useMemo(() => {
-    // Scalp shell: the head surface pushed out along its normals, clipped at the hairline.
-    const g = setGeometry(model, fit, 'body', (v) => fit.positions[v * 3 + 1] > cy - h * 1.3);
-    const p = g.attributes.position, n = g.attributes.normal;
-    const lift = (long ? 0.016 : 0.009) * anchors.H / 1.7;
-    for (let i = 0; i < p.count; i++) p.setXYZ(i, p.getX(i) + n.getX(i) * lift, p.getY(i) + n.getY(i) * lift, p.getZ(i) + n.getZ(i) * lift);
+  const { shells, plane } = useMemo(() => {
+    const k = anchors.H / 1.7;
+    const base = setGeometry(model, fit, 'body', (v) => fit.positions[v * 3 + 1] > cy - h * 1.3);
+    const bp = base.attributes.position, bn = base.attributes.normal;
+    const list = HAIR_SHELLS.map(([lift]) => {
+      const g = base.clone();
+      const p = g.attributes.position;
+      const uv = new Float32Array(p.count * 2);
+      const d = (lift + (long ? 0.006 : 0)) * k;
+      for (let i = 0; i < p.count; i++) {
+        p.setXYZ(i, bp.getX(i) + bn.getX(i) * d, bp.getY(i) + bn.getY(i) * d, bp.getZ(i) + bn.getZ(i) * d);
+        // Strands run from the crown downward: u wraps around the head.
+        uv[i * 2] = (Math.atan2(bp.getX(i), bp.getZ(i) - cz) / (Math.PI * 2)) * 5;
+        uv[i * 2 + 1] = (bp.getY(i) - cy) / h;
+      }
+      g.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+      return g;
+    });
+    base.dispose();
+    if (long) {
+      // Sheets from ear level to below the shoulders, wrapping the back and sides.
+      const top = cy - h * 0.1, bottom = frame.shoulderY - 0.13 * anchors.H;
+      HAIR_SHELLS.forEach(([lift], si) => {
+        const rings: Ring[] = [];
+        const n = 22;
+        for (let i = 0; i <= n; i++) {
+          const y = bottom + ((top - bottom) * i) / n;
+          const t = Math.min(1, Math.max(0, (y - (anchors.neck.y - 0.02)) / (top - anchors.neck.y + 0.02)));
+          const tz = frame.trunk.centreB(y), td = frame.trunk.depthHalf(y), th = frame.trunk.half(y);
+          const off = (lift + 0.012) * k;
+          // Head ellipse above the neck, the upper back's section below it.
+          const back = (cz - b * 1.02) * t + (tz - td) * (1 - t) - off;
+          const half = a * 0.98 * t + Math.min(th * 0.8, a * 1.5) * (1 - t) + off;
+          const centre = cz * t + (tz - td * 0.35) * (1 - t);
+          const taper = i < 3 ? 0.82 + 0.06 * i : 1;
+          rings.push({ y, cx: 0, cz: centre, a: half * taper, b: Math.max(0.03, centre - back) });
+        }
+        const g = loft(rings, { segments: 26, arc: [Math.PI * 1.08, Math.PI * 1.92] });
+        const uv = g.attributes.uv;
+        for (let i = 0; i < uv.count; i++) uv.setXY(i, uv.getX(i) * 3 + si * 0.37, uv.getY(i));
+        list.push(g);
+      });
+    }
     const front = new THREE.Vector3(0, cy + h * 0.56, cz + b * 0.86);
-    const back = new THREE.Vector3(0, cy - h * (long ? 1.25 : 0.5), cz - b * 0.8);
+    const back = new THREE.Vector3(0, cy - h * (long ? 0.2 : 0.5), cz - b * 0.8);
     const normal = new THREE.Vector3(0, front.z - back.z, -(front.y - back.y)).normalize();
-    return { geometry: g, plane: new THREE.Plane().setFromNormalAndCoplanarPoint(normal, front) };
-  }, [model, fit, anchors, cy, cz, b, h, long]);
-  useDisposable(useMemo(() => [geometry], [geometry]));
+    return { shells: list, plane: new THREE.Plane().setFromNormalAndCoplanarPoint(normal, front) };
+  }, [model, fit, anchors, frame, cy, cz, a, b, h, long]);
+  useDisposable(shells);
+  const map = strands();
   return (
-    <mesh geometry={geometry}>
-      <meshStandardMaterial color={body.hairColor} roughness={0.72} clippingPlanes={[plane]} side={THREE.DoubleSide} />
-    </mesh>
+    <group>
+      {shells.map((g, i) => {
+        const scalp = i < HAIR_SHELLS.length;
+        return (
+          <mesh key={i} geometry={g} castShadow={i % HAIR_SHELLS.length === 0}>
+            <meshStandardMaterial color={body.hairColor} map={map} alphaTest={HAIR_SHELLS[i % HAIR_SHELLS.length][1]} roughness={0.45} clippingPlanes={scalp ? [plane] : null} side={THREE.DoubleSide} />
+          </mesh>
+        );
+      })}
+    </group>
   );
 }
 
-/**
- * The user's face from the front capture, projected onto the front of the head. Opacity fades
- * toward the sides, the hairline and the jaw so it blends into the skin tone.
- */
 /** Photo coordinates for a point on the head, from the eye and chin landmarks. */
 function faceMapping(face: NonNullable<BodyParams['face']>, anchors: Anchors) {
   const { eyes, chinY } = anchors;
@@ -274,34 +357,85 @@ function FaceDecal({ face, model, fit, anchors }: { face: NonNullable<BodyParams
   );
 }
 
-function Body({ body, model, fit, anchors }: { body: BodyParams; model: HumanModel; fit: FittedBody; anchors: Anchors }) {
+let irisTexture: THREE.DataTexture | undefined;
+/** Eyeball texture for a sphere whose +v pole faces forward: pupil, streaked iris, limbal ring, sclera. */
+function iris(): THREE.DataTexture {
+  if (irisTexture) return irisTexture;
+  const w = 128, h = 256;
+  const data = new Uint8Array(w * h * 4);
+  let seed = 11;
+  const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+  const streak = Array.from({ length: w }, rnd);
+  for (let y = 0; y < h; y++) {
+    // Angle from the forward pole in 0..1 (1 = back of the eye).
+    const a = 1 - y / (h - 1);
+    for (let x = 0; x < w; x++) {
+      let c: [number, number, number];
+      if (a < 0.055) c = [8, 6, 6];
+      else if (a < 0.17) {
+        const t = (a - 0.055) / 0.115;
+        const s = 0.75 + 0.5 * streak[x];
+        c = [(70 + 55 * t) * s, (44 + 34 * t) * s, (24 + 14 * t) * s];
+        if (t > 0.86) c = [c[0] * 0.45, c[1] * 0.45, c[2] * 0.45];
+      } else c = [236 - a * 40, 230 - a * 46, 226 - a * 46];
+      data.set([c[0], c[1], c[2], 255], (y * w + x) * 4);
+    }
+  }
+  const t = new THREE.DataTexture(data, w, h, THREE.RGBAFormat);
+  t.colorSpace = THREE.SRGBColorSpace;
+  t.magFilter = THREE.LinearFilter;
+  t.minFilter = THREE.LinearFilter;
+  t.needsUpdate = true;
+  return (irisTexture = t);
+}
+
+function Body({ body, model, fit, anchors, frame }: { body: BodyParams; model: HumanModel; fit: FittedBody; anchors: Anchors; frame: BodyFrame }) {
   const face = body.face;
   const geo = useMemo(() => {
-    const eyes = setGeometry(model, fit, 'eyes');
-    if (face) {
-      // With a face photo the eyeballs show the user's own eyes from the same projection.
-      const { uv } = faceMapping(face, anchors);
-      const p = eyes.attributes.position;
-      const arr = new Float32Array(p.count * 2);
-      for (let i = 0; i < p.count; i++) arr.set(uv(p.getX(i), p.getY(i)), i * 2);
-      eyes.setAttribute('uv', new THREE.BufferAttribute(arr, 2));
-    }
-    return { skin: setGeometry(model, fit, 'body'), eyes };
-  }, [model, fit, face, anchors]);
+    // Eyeballs: spheres at the mesh's eye sockets, pole turned to face forward.
+    const balls = anchors.eyeballs.map((e) => {
+      const g = new THREE.SphereGeometry(e.radius, 28, 20);
+      g.rotateX(Math.PI / 2);
+      g.translate(e.centre[0], e.centre[1], e.centre[2]);
+      if (face) {
+        // With a face photo the eyeballs show the user's own eyes from the same projection.
+        const { uv } = faceMapping(face, anchors);
+        const p = g.attributes.position;
+        const arr = new Float32Array(p.count * 2);
+        for (let i = 0; i < p.count; i++) arr.set(uv(p.getX(i), p.getY(i)), i * 2);
+        g.setAttribute('uv', new THREE.BufferAttribute(arr, 2));
+      }
+      return g;
+    });
+    const skin = setGeometry(model, fit, 'body');
+    const brow = new THREE.Color(body.hairColor).multiplyScalar(0.9);
+    const skinTone = new THREE.Color(body.skin);
+    // Eyebrow tint is expressed relative to the skin colour it multiplies.
+    const rel: [number, number, number] = [brow.r / Math.max(0.05, skinTone.r), brow.g / Math.max(0.05, skinTone.g), brow.b / Math.max(0.05, skinTone.b)];
+    const features = face ? null : { eyeY: anchors.eyes.y, eyeDx: anchors.eyes.dx, chinY: anchors.chinY, frontZ: anchors.head.cz };
+    skin.setAttribute('color', new THREE.BufferAttribute(skinColors(model, fit, features, rel), 3));
+    return { skin, eyeL: balls[0], eyeR: balls[1], lashes: setGeometry(model, fit, 'lashes') };
+  }, [model, fit, face, anchors, body.hairColor, body.skin]);
   useDisposable(useMemo(() => Object.values(geo), [geo]));
-  const generic = useImageTexture(useAssetUri(require('../../assets/body/eye.png')));
   const photo = useImageTexture(face?.uri);
-  const eye = face ? photo : generic;
+  const eye = face ? photo : iris();
   return (
     <group>
-      <mesh geometry={geo.skin}>
-        <meshStandardMaterial color={body.skin} roughness={0.58} />
+      <mesh geometry={geo.skin} castShadow receiveShadow>
+        <meshPhysicalMaterial color={body.skin} vertexColors roughness={0.56} sheen={0.22} sheenRoughness={0.5} sheenColor="#e8765f" />
       </mesh>
-      <mesh geometry={geo.eyes}>
-        <meshStandardMaterial key={eye ? 't' : 'c'} color="#ffffff" map={eye} roughness={0.15} />
-      </mesh>
-      {body.face && <FaceDecal face={body.face} model={model} fit={fit} anchors={anchors} />}
-      {body.hair !== 'none' && <Hair body={body} model={model} fit={fit} anchors={anchors} />}
+      {[geo.eyeL, geo.eyeR].map((g, i) => (
+        <mesh key={i} geometry={g}>
+          <meshStandardMaterial key={eye ? 't' : 'c'} color="#e6e6e6" map={eye} roughness={0.1} envMapIntensity={0.7} />
+        </mesh>
+      ))}
+      {!face && (
+        <mesh geometry={geo.lashes}>
+          <meshStandardMaterial color="#17120f" roughness={0.6} transparent opacity={0.5} depthWrite={false} side={THREE.DoubleSide} />
+        </mesh>
+      )}
+      {face && <FaceDecal face={face} model={model} fit={fit} anchors={anchors} />}
+      {body.hair !== 'none' && <Hair body={body} model={model} fit={fit} anchors={anchors} frame={frame} />}
     </group>
   );
 }
@@ -312,7 +446,7 @@ function Figure({ body, model, garments }: { body: BodyParams; model: HumanModel
   const anch = useMemo(() => bodyAnchors(model, fit, frame), [model, fit, frame]);
   return (
     <group>
-      <Body body={body} model={model} fit={fit} anchors={anch} />
+      <Body body={body} model={model} fit={fit} anchors={anch} frame={frame} />
       <Cloths garments={garments} frame={frame} />
       {garments
         .filter((g) => !CLOTH_KINDS.includes(g.kind))
@@ -345,6 +479,10 @@ function Ground({ radius }: { radius: number }) {
       <mesh rotation-x={-Math.PI / 2} position-y={0.001} scale={[radius * 1.1, radius * 0.8, 1]}>
         <circleGeometry args={[1, 40]} />
         <meshBasicMaterial map={shadow} transparent depthWrite={false} />
+      </mesh>
+      <mesh rotation-x={-Math.PI / 2} position-y={0.0008} receiveShadow>
+        <circleGeometry args={[radius * 4, 48]} />
+        <shadowMaterial transparent opacity={0.2} depthWrite={false} />
       </mesh>
       <mesh rotation-x={-Math.PI / 2} position-y={0.0005}>
         <ringGeometry args={[radius * 1.28, radius * 1.295, 96]} />
@@ -454,12 +592,43 @@ export function Stage({ body, garments, focus = 'full', autoRotate = true, inter
   const model = useHuman();
   return (
     <View style={[styles.fill, style]}>
-      <Canvas camera={{ fov: 27, near: 0.05, far: 60, position: [0, 1, 6] }} dpr={[1, 2]} gl={{ antialias: true }} onCreated={({ gl }) => { gl.localClippingEnabled = true; }}>
+      <Canvas
+        shadows
+        camera={{ fov: 27, near: 0.05, far: 60, position: [0, 1, 6] }}
+        dpr={[1, 2]}
+        gl={{ antialias: true }}
+        onCreated={({ gl, scene }) => {
+          gl.localClippingEnabled = true;
+          gl.shadowMap.type = THREE.PCFSoftShadowMap;
+          // Image-based lighting from a procedural studio room; skipped where the GPU cannot
+          // render the required float targets, leaving the direct lights below.
+          try {
+            const pmrem = new THREE.PMREMGenerator(gl);
+            scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+            scene.environmentIntensity = 0.32;
+            pmrem.dispose();
+          } catch {
+            scene.environment = null;
+          }
+        }}>
         <CameraRig rig={rig} focus={focus} height={H} autoRotate={autoRotate} />
-        <hemisphereLight args={['#ffffff', '#3a3646', 1.0]} />
-        <directionalLight position={[2.5, 4, 3.5]} intensity={2.4} />
-        <directionalLight position={[-3.5, 2, 2]} intensity={0.8} color="#cfd6ff" />
-        <directionalLight position={[0.5, 3, -4]} intensity={1.6} color="#ffe6c9" />
+        <hemisphereLight args={['#ffffff', '#3a3646', 0.25]} />
+        <directionalLight
+          position={[2.2, 4.2, 3.4]}
+          intensity={1.75}
+          castShadow
+          shadow-mapSize={[1024, 1024]}
+          shadow-bias={-0.0004}
+          shadow-normalBias={0.012}
+          shadow-camera-left={-2.2}
+          shadow-camera-right={2.2}
+          shadow-camera-top={2.3}
+          shadow-camera-bottom={-0.3}
+          shadow-camera-near={0.5}
+          shadow-camera-far={12}
+        />
+        <directionalLight position={[-3.5, 2, 2]} intensity={0.5} color="#cfd6ff" />
+        <directionalLight position={[0.5, 3, -4]} intensity={1.0} color="#ffe6c9" />
         {model && <Figure body={body} model={model} garments={garments} />}
         <Ground radius={H * 0.3} />
       </Canvas>
