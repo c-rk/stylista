@@ -238,7 +238,9 @@ export function scanGarment(img: Pixels, alphaFull: Float32Array, forced?: ScanK
         if (!c) continue;
         // Above the armpit the torso band is clamped to the armpit width; below, sleeves that
         // hang beside the body are separate runs and the central run is the torso.
-        const lim = y < armpitY ? torsoHalf * 1.04 : Infinity;
+        // The clamp extends a little below the detected armpit row, where the under-arm seam
+        // still joins sleeve and torso in one run.
+        const lim = y < armpitY + span * 0.035 ? torsoHalf * 1.04 : Infinity;
         left[y] = Math.max(c[0], cx - lim);
         right[y] = Math.min(c[1], cx + lim);
       }
@@ -295,7 +297,13 @@ export function scanGarment(img: Pixels, alphaFull: Float32Array, forced?: ScanK
       if (forced === 'skirt') (fitHalf = topWidth / 2), (anchorY = first);
     }
   }
-  const sl = smooth(left, 1), sr = smooth(right, 1);
+  // Median over a few rows removes single-row spikes (stray matte pixels, seam joins) before
+  // the light smoothing; a spike would become a ridge around the body.
+  const despike = (v: number[]) => {
+    const r = Math.max(2, Math.round(h * 0.008));
+    return v.map((_, i) => median(v.slice(Math.max(0, i - r), i + r + 1)));
+  };
+  const sl = smooth(despike(left), 2), sr = smooth(despike(right), 2);
 
   // ---- atlas: front | back, with colour bled into transparent texels ---------------------
   const atlas = new Uint8Array(w * 2 * h * 4);

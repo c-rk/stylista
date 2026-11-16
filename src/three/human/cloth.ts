@@ -185,6 +185,26 @@ export class Polar {
     }
   }
 
+  /** Blends another stack with identical layout into this one; `w(t)` is the other's share. */
+  mix(other: Polar, w: (t: number) => number): this {
+    for (let ring = 0; ring < this.rings; ring++) {
+      const k = w(this.t0 + ring * this.step);
+      if (k <= 0) continue;
+      let ha = 0, hb = 0;
+      for (let j = 0; j < NT; j++) {
+        // Both stacks are expressed about this stack's centre.
+        const ox = other.ca[ring] + other.r[ring * NT + j] * COS[j] - this.ca[ring], oz = other.cb[ring] + other.r[ring * NT + j] * SIN[j] - this.cb[ring];
+        const r = this.r[ring * NT + j] * (1 - k) + Math.hypot(ox, oz) * k;
+        this.r[ring * NT + j] = r;
+        ha = Math.max(ha, Math.abs(r * COS[j]));
+        hb = Math.max(hb, Math.abs(r * SIN[j]));
+      }
+      this.ha[ring] = ha;
+      this.hb[ring] = hb;
+    }
+    return this;
+  }
+
   private pos(t: number): [number, number, number] {
     const f = clamp((t - this.t0) / this.step, 0, this.rings - 1);
     const i = Math.min(this.rings - 2, Math.floor(f));
@@ -259,15 +279,17 @@ export function bodyFrame(model: HumanModel, fit: FittedBody): BodyFrame {
   // Triangles on base-vertex ids, classified by body part.
   const arm = (v: number) => parts[v * 6 + PART.armL] + parts[v * 6 + PART.armR];
   const trunkTris: number[] = [];
+  const capTris: number[] = [];
   const legTris: Record<number, number[]> = { [-1]: [], 1: [] };
   const armTris: Record<number, number[]> = { [-1]: [], 1: [] };
   const armPart = (sgn: number) => (sgn * model.meta.leftSign > 0 ? PART.armL : PART.armR);
   for (let k = 0; k < idx.length; k += 3) {
     const a = vmap[idx[k]], b = vmap[idx[k + 1]], c = vmap[idx[k + 2]];
     const armW = Math.max(arm(a), arm(b), arm(c));
-    // The trunk keeps the shoulder caps: arm triangles that lie inboard of the shoulder joints.
-    const cap = Math.max(Math.abs(pos[a * 3]), Math.abs(pos[b * 3]), Math.abs(pos[c * 3])) < capX && Math.min(pos[a * 3 + 1], pos[b * 3 + 1], pos[c * 3 + 1]) > shoulderY - 0.055 * H;
-    if (armW < 110 || cap) {
+    // Shoulder caps: arm triangles inboard of the shoulder points, above the armpits.
+    const cap = Math.max(Math.abs(pos[a * 3]), Math.abs(pos[b * 3]), Math.abs(pos[c * 3])) < capX && Math.min(pos[a * 3 + 1], pos[b * 3 + 1], pos[c * 3 + 1]) > shoulderY - 0.1 * H;
+    if (armW < 110 || cap) capTris.push(a, b, c);
+    if (armW < 110) {
       trunkTris.push(a, b, c);
       const xs = pos[a * 3] + pos[b * 3] + pos[c * 3];
       if (Math.max(pos[a * 3 + 1], pos[b * 3 + 1], pos[c * 3 + 1]) < crotchY + 0.1) legTris[xs >= 0 ? 1 : -1].push(a, b, c);
@@ -281,7 +303,12 @@ export function bodyFrame(model: HumanModel, fit: FittedBody): BodyFrame {
   const yxz = new Float32Array(pos.length);
   for (let i = 0; i < pos.length; i += 3) (yxz[i] = pos[i + 1]), (yxz[i + 1] = pos[i]), (yxz[i + 2] = pos[i + 2]);
 
-  const trunk = new Polar(0.03, neckY + 0.05, STEP).build(yxz, trunkTris, true);
+  // Trunk without arms, faded into the trunk-with-shoulder-caps hull between armpit and shoulder
+  // so the section changes gradually (a sudden change would crease the cloth).
+  const armpit = shoulderY - 0.072 * H;
+  const trunk = new Polar(0.03, neckY + 0.05, STEP)
+    .build(yxz, trunkTris, true)
+    .mix(new Polar(0.03, neckY + 0.05, STEP).build(yxz, capTris, true), (y) => smoothstep(armpit - 0.01, shoulderY - 0.025, y));
   const legs = {} as BodyFrame['legs'];
   const arms = {} as BodyFrame['arms'];
   const feet = {} as BodyFrame['feet'];
@@ -527,16 +554,19 @@ export function buildCloth(frame: BodyFrame, scan: GarmentScan, { layer, size, u
       const lenP = Math.hypot(sl.tip[0] - sl.origin[0], sl.tip[1] - sl.origin[1]);
       const cuff = Math.min(lenP * kLen, arm.length * 0.99);
       const dx = (sl.tip[0] - sl.origin[0]) / lenP, dy = (sl.tip[1] - sl.origin[1]) / lenP;
-      const ts = levels(-0.07, cuff);
+      const ts = levels(-0.025, cuff);
       grid(ts.length, (i, j) => {
         const t = ts[i];
         const tp = t / (lenP * kLen);
-        const bh = arm.polar.half(t);
+        // Sections this close to the joint cut through the chest; the sleeve head reuses the
+        // first clean arm section instead.
+        const ts2 = Math.max(t, 0.055);
+        const bh = arm.polar.half(ts2);
         const gh = station(sl.half, tp);
         const ch = clamp(gh * k, bh + ease, bh * MAX_WIDEN);
         const f = ch / bh;
-        const r = (arm.polar.radius(t, j) + ease * 0.6) * f;
-        const a = arm.polar.centreA(t) + r * COS[j], b = arm.polar.centreB(t) + r * SIN[j];
+        const r = (arm.polar.radius(ts2, j) + ease * 0.6) * f;
+        const a = arm.polar.centreA(ts2) + r * COS[j], b = arm.polar.centreB(ts2) + r * SIN[j];
         // Lookups stay well inside the photographed sleeve so its alpha never cuts holes; the
         // cuff edge comes from the geometry.
         const across = station(sl.centre, tp) + clamp((r * COS[j]) / ch, -0.72, 0.72) * gh;
