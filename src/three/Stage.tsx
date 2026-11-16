@@ -9,13 +9,14 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { PanResponder, StyleProp, StyleSheet, View, ViewStyle } from 'react-native';
 import * as THREE from 'three';
 
-import type { BodyParams, Garment } from '@/types';
-import { computeBody } from './body';
+import type { BodyParams, Garment, GarmentKind } from '@/types';
+import { SyntheticGarment, syntheticGarment, SyntheticKind } from '@/vision/synthetic';
+import { buildAccessory } from './garments';
+import { Anchors, anchors as bodyAnchors } from './human/anchors';
+import { bodyFrame, BodyFrame, buildCloth, Cloth, Occupancy } from './human/cloth';
 import { setGeometry } from './human/geometry';
 import { useHuman } from './human/load';
 import type { FittedBody, HumanModel } from './human/model';
-import { bodyFrame, BodyFrame, buildCloth, Occupancy } from './human/cloth';
-import { buildGarment, Part } from './garments';
 
 export type Focus = 'full' | 'upper' | 'lower' | 'feet' | 'head';
 
@@ -38,15 +39,13 @@ interface Rig {
   idle: number;
 }
 
+
 function useDisposable<T extends { dispose(): void }>(items: T[]) {
   useEffect(() => () => items.forEach((i) => i.dispose()), [items]);
 }
 
-function useGarmentTexture(g: Garment): THREE.Texture | null {
-  const [loaded, setLoaded] = useState<{ key: string; tex: THREE.Texture } | null>(null);
-  const uri = g.textureMode === 'solid' ? undefined : (g.textureUri ?? g.imageUri);
-  const mode = g.textureMode;
-  const key = `${mode}|${uri}`;
+function useImageTexture(uri?: string, mipmaps = true): THREE.Texture | null {
+  const [loaded, setLoaded] = useState<{ uri: string; tex: THREE.Texture } | null>(null);
   useEffect(() => {
     if (!uri) return;
     let alive = true;
@@ -54,17 +53,34 @@ function useGarmentTexture(g: Garment): THREE.Texture | null {
     new THREE.TextureLoader().load(uri, (t) => {
       tex = t;
       t.colorSpace = THREE.SRGBColorSpace;
-      t.wrapS = t.wrapT = mode === 'fabric' ? THREE.MirroredRepeatWrapping : THREE.ClampToEdgeWrapping;
       t.anisotropy = 4;
-      if (alive) setLoaded({ key, tex: t });
+      if (!mipmaps) {
+        // Mip levels would average fabric with the transparent surround at alpha edges.
+        t.generateMipmaps = false;
+        t.minFilter = THREE.LinearFilter;
+      }
+      if (alive) setLoaded({ uri, tex: t });
       else t.dispose();
     });
     return () => {
       alive = false;
       tex?.dispose();
     };
-  }, [uri, mode, key]);
-  return uri && loaded?.key === key ? loaded.tex : null;
+  }, [uri, mipmaps]);
+  return uri && loaded?.uri === uri ? loaded.tex : null;
+}
+
+function useAssetUri(module: number): string | undefined {
+  const [uri, setUri] = useState<string>();
+  useEffect(() => {
+    let alive = true;
+    const asset = Asset.fromModule(module);
+    asset.downloadAsync().then(() => alive && setUri(asset.localUri ?? asset.uri), () => {});
+    return () => {
+      alive = false;
+    };
+  }, [module]);
+  return uri;
 }
 
 function shade(hex: string, kind: 'trim' | 'sole'): string {
@@ -75,80 +91,100 @@ function shade(hex: string, kind: 'trim' | 'sole'): string {
   return '#' + c.setHSL(hsl.h, hsl.s * 0.85, hsl.l < 0.12 ? 0.22 : hsl.l * 0.62).getHexString();
 }
 
-const LAYER: Partial<Record<Garment['kind'], number>> = { trousers: 0.002, skirt: 0.003, top: 0.005, dress: 0.005, outerwear: 0.011 };
+// ---- cloth -----------------------------------------------------------------------------
 
-function ClothMesh({ garment, geo }: { garment: Garment; geo: { front: THREE.BufferGeometry; back: THREE.BufferGeometry } }) {
-  const tex = useAtlas(garment.atlasUri);
-  if (!tex) return null;
+/** Clearance from the skin per garment class, metres. Also the inside-out build order. */
+const LAYER: Record<string, number> = { base: 0.0008, trousers: 0.002, skirt: 0.003, top: 0.005, dress: 0.005, outerwear: 0.011 };
+const CLOTH_KINDS: GarmentKind[] = ['top', 'outerwear', 'dress', 'trousers', 'skirt'];
+
+interface ClothItem {
+  id: string;
+  layer: number;
+  color: string;
+  size: number;
+  /** Photo garments reference a stored atlas; procedural ones carry their own. */
+  garment?: Garment;
+  synthetic?: SyntheticGarment;
+}
+
+function dataTexture(s: SyntheticGarment): THREE.DataTexture {
+  // Flip rows: data textures have their first row at v = 0, image textures at v = 1.
+  const flipped = new Uint8Array(s.atlas.length);
+  const stride = s.width * 4;
+  for (let y = 0; y < s.height; y++) flipped.set(s.atlas.subarray(y * stride, (y + 1) * stride), (s.height - 1 - y) * stride);
+  const t = new THREE.DataTexture(flipped, s.width, s.height, THREE.RGBAFormat);
+  t.colorSpace = THREE.SRGBColorSpace;
+  t.magFilter = THREE.LinearFilter;
+  t.minFilter = THREE.LinearFilter;
+  t.needsUpdate = true;
+  return t;
+}
+
+function ClothSurface({ cloth, map, color }: { cloth: Cloth; map: THREE.Texture; color: string }) {
   return (
     <group>
-      {[geo.front, geo.back].map((g, i) => (
+      {[cloth.front, cloth.back].map((g, i) => (
         <mesh key={i} geometry={g}>
-          <meshStandardMaterial map={tex} color={garment.textureMode === 'solid' ? garment.color : '#ffffff'} alphaTest={0.5} roughness={0.86} side={THREE.DoubleSide} />
+          <meshStandardMaterial map={map} color={color} alphaTest={0.5} roughness={0.86} side={THREE.DoubleSide} />
         </mesh>
       ))}
     </group>
   );
 }
 
-/** Scanned garments, built inside-out so each layer clears the ones beneath it. */
-function Cloths({ garments, frame }: { garments: Garment[]; frame: BodyFrame }) {
+function PhotoCloth({ item, cloth }: { item: ClothItem; cloth: Cloth }) {
+  const map = useImageTexture(item.garment!.atlasUri, false);
+  return map ? <ClothSurface cloth={cloth} map={map} color="#ffffff" /> : null;
+}
+
+function SyntheticCloth({ item, cloth }: { item: ClothItem; cloth: Cloth }) {
+  const map = useMemo(() => dataTexture(item.synthetic!), [item.synthetic]);
+  useDisposable(useMemo(() => [map], [map]));
+  return <ClothSurface cloth={cloth} map={map} color={item.color} />;
+}
+
+/** All cloth layers, built inside-out so each one clears those beneath it. */
+function Cloths({ garments, frame, gender }: { garments: Garment[]; frame: BodyFrame; gender: number }) {
+  const items = useMemo(() => {
+    const base = { sleeve: 0, length: 0, fit: 0, flare: 0 };
+    const list: ClothItem[] = [{ id: '_briefs', layer: LAYER.base, color: '#D6D1CB', size: 1, synthetic: syntheticGarment('briefs', base) }];
+    if (gender < 0.6) list.push({ id: '_bra', layer: LAYER.base, color: '#D6D1CB', size: 1, synthetic: syntheticGarment('bra', base) });
+    for (const g of garments) {
+      if (!CLOTH_KINDS.includes(g.kind)) continue;
+      const layer = LAYER[g.kind];
+      if (g.scan && g.atlasUri) list.push({ id: g.id, layer, color: g.color, size: g.size ?? 1, garment: g });
+      else list.push({ id: g.id, layer, color: g.color, size: g.size ?? 1, synthetic: syntheticGarment(g.kind as SyntheticKind, g.shape) });
+    }
+    return list.sort((a, b) => a.layer - b.layer);
+  }, [garments, gender]);
+
   const built = useMemo(() => {
     const under = new Occupancy();
-    return [...garments]
-      .sort((a, b) => (LAYER[a.kind] ?? 0) - (LAYER[b.kind] ?? 0))
-      .map((garment) => {
-        const geo = buildCloth(frame, garment.scan!, { layer: LAYER[garment.kind] ?? 0.005, size: garment.size ?? 1, under });
-        under.absorb(geo.occupied);
-        return { garment, geo };
-      });
-  }, [garments, frame]);
-  useDisposable(useMemo(() => built.flatMap((b) => [b.geo.front, b.geo.back]), [built]));
+    return items.map((item) => {
+      const cloth = buildCloth(frame, item.garment?.scan ?? item.synthetic!.scan, { layer: item.layer, size: item.size, under, tight: item.layer === LAYER.base });
+      under.absorb(cloth.occupied);
+      return { item, cloth };
+    });
+  }, [items, frame]);
+  useDisposable(useMemo(() => built.flatMap((b) => [b.cloth.front, b.cloth.back]), [built]));
+
   return (
     <group>
-      {built.map((b) => (
-        <ClothMesh key={b.garment.id} garment={b.garment} geo={b.geo} />
-      ))}
+      {built.map(({ item, cloth }) => (item.garment ? <PhotoCloth key={item.id} item={item} cloth={cloth} /> : <SyntheticCloth key={item.id} item={item} cloth={cloth} />))}
     </group>
   );
 }
 
-function useAtlas(uri?: string): THREE.Texture | null {
-  const [loaded, setLoaded] = useState<{ uri: string; tex: THREE.Texture } | null>(null);
-  useEffect(() => {
-    if (!uri) return;
-    let alive = true;
-    let tex: THREE.Texture | undefined;
-    new THREE.TextureLoader().load(uri, (t) => {
-      tex = t;
-      t.colorSpace = THREE.SRGBColorSpace;
-      t.anisotropy = 4;
-      t.generateMipmaps = false;
-      t.minFilter = THREE.LinearFilter;
-      if (alive) setLoaded({ uri, tex: t });
-      else t.dispose();
-    });
-    return () => {
-      alive = false;
-      tex?.dispose();
-    };
-  }, [uri]);
-  return uri && loaded?.uri === uri ? loaded.tex : null;
-}
-
-function GarmentMesh({ garment, body }: { garment: Garment; body: BodyParams }) {
-  const parts: Part[] = useMemo(() => buildGarment(computeBody(body), garment), [body, garment]);
+function Accessory({ garment, anchors }: { garment: Garment; anchors: Anchors }) {
+  const parts = useMemo(() => buildAccessory(anchors, garment), [anchors, garment]);
   useDisposable(useMemo(() => parts.map((p) => p.geometry), [parts]));
-  const tex = useGarmentTexture(garment);
   const trim = shade(garment.color, 'trim');
   const sole = shade(garment.color, 'sole');
   return (
     <group>
       {parts.map((p, i) => (
         <mesh key={i} geometry={p.geometry}>
-          {p.material === 'main' && (
-            <meshStandardMaterial key={tex ? 't' : 'c'} color={tex ? '#ffffff' : garment.color} map={tex} roughness={0.84} side={THREE.DoubleSide} />
-          )}
+          {p.material === 'main' && <meshStandardMaterial color={garment.color} roughness={0.8} side={THREE.DoubleSide} />}
           {p.material === 'trim' && <meshStandardMaterial color={trim} roughness={0.7} />}
           {p.material === 'sole' && <meshStandardMaterial color={sole} roughness={0.8} />}
           {p.material === 'metal' && <meshStandardMaterial color={garment.color} roughness={0.28} metalness={0.45} />}
@@ -159,13 +195,34 @@ function GarmentMesh({ garment, body }: { garment: Garment; body: BodyParams }) 
   );
 }
 
-function Body({ body, model, fit }: { body: BodyParams; model: HumanModel; fit: FittedBody }) {
-  const geo = useMemo(
-    () => ({ skin: setGeometry(model, fit, 'body'), eyes: setGeometry(model, fit, 'eyes'), hair: setGeometry(model, fit, 'hair') }),
-    [model, fit],
+// ---- body ------------------------------------------------------------------------------
+
+function Hair({ body, model, fit, anchors }: { body: BodyParams; model: HumanModel; fit: FittedBody; anchors: Anchors }) {
+  const { cy, cz, b, h } = anchors.head;
+  const long = body.hair === 'long';
+  const { geometry, plane } = useMemo(() => {
+    // Scalp shell: the head surface pushed out along its normals, clipped at the hairline.
+    const g = setGeometry(model, fit, 'body', (v) => fit.positions[v * 3 + 1] > cy - h * 1.3);
+    const p = g.attributes.position, n = g.attributes.normal;
+    const lift = (long ? 0.016 : 0.009) * anchors.H / 1.7;
+    for (let i = 0; i < p.count; i++) p.setXYZ(i, p.getX(i) + n.getX(i) * lift, p.getY(i) + n.getY(i) * lift, p.getZ(i) + n.getZ(i) * lift);
+    const front = new THREE.Vector3(0, cy + h * 0.56, cz + b * 0.86);
+    const back = new THREE.Vector3(0, cy - h * (long ? 1.25 : 0.5), cz - b * 0.8);
+    const normal = new THREE.Vector3(0, front.z - back.z, -(front.y - back.y)).normalize();
+    return { geometry: g, plane: new THREE.Plane().setFromNormalAndCoplanarPoint(normal, front) };
+  }, [model, fit, anchors, cy, cz, b, h, long]);
+  useDisposable(useMemo(() => [geometry], [geometry]));
+  return (
+    <mesh geometry={geometry}>
+      <meshStandardMaterial color={body.hairColor} roughness={0.72} clippingPlanes={[plane]} side={THREE.DoubleSide} />
+    </mesh>
   );
+}
+
+function Body({ body, model, fit, anchors }: { body: BodyParams; model: HumanModel; fit: FittedBody; anchors: Anchors }) {
+  const geo = useMemo(() => ({ skin: setGeometry(model, fit, 'body'), eyes: setGeometry(model, fit, 'eyes') }), [model, fit]);
   useDisposable(useMemo(() => Object.values(geo), [geo]));
-  const eye = useAssetTexture(require('../../assets/body/eye.png'));
+  const eye = useImageTexture(useAssetUri(require('../../assets/body/eye.png')));
   return (
     <group>
       <mesh geometry={geo.skin}>
@@ -174,35 +231,26 @@ function Body({ body, model, fit }: { body: BodyParams; model: HumanModel; fit: 
       <mesh geometry={geo.eyes}>
         <meshStandardMaterial key={eye ? 't' : 'c'} color="#ffffff" map={eye} roughness={0.15} />
       </mesh>
-      {body.hair !== 'none' && (
-        <mesh geometry={geo.hair}>
-          <meshStandardMaterial color={body.hairColor} roughness={0.75} side={THREE.DoubleSide} />
-        </mesh>
-      )}
+      {body.hair !== 'none' && <Hair body={body} model={model} fit={fit} anchors={anchors} />}
     </group>
   );
 }
 
-function useAssetTexture(module: number): THREE.Texture | null {
-  const [tex, setTex] = useState<THREE.Texture | null>(null);
-  useEffect(() => {
-    let alive = true;
-    let t: THREE.Texture | undefined;
-    const asset = Asset.fromModule(module);
-    asset.downloadAsync().then(() => {
-      new THREE.TextureLoader().load(asset.localUri ?? asset.uri, (loaded) => {
-        t = loaded;
-        loaded.colorSpace = THREE.SRGBColorSpace;
-        if (alive) setTex(loaded);
-        else loaded.dispose();
-      });
-    }, () => {});
-    return () => {
-      alive = false;
-      t?.dispose();
-    };
-  }, [module]);
-  return tex;
+function Figure({ body, model, garments }: { body: BodyParams; model: HumanModel; garments: Garment[] }) {
+  const fit = useMemo(() => model.fit(body), [model, body]);
+  const frame = useMemo(() => bodyFrame(model, fit), [model, fit]);
+  const anch = useMemo(() => bodyAnchors(model, fit, frame), [model, fit, frame]);
+  return (
+    <group>
+      <Body body={body} model={model} fit={fit} anchors={anch} />
+      <Cloths garments={garments} frame={frame} gender={body.gender ?? 0.5} />
+      {garments
+        .filter((g) => !CLOTH_KINDS.includes(g.kind))
+        .map((g) => (
+          <Accessory key={g.id} garment={g} anchors={anch} />
+        ))}
+    </group>
+  );
 }
 
 function Ground({ radius }: { radius: number }) {
@@ -264,21 +312,6 @@ function CameraRig({ rig, focus, height, autoRotate }: { rig: React.RefObject<Ri
     camera.lookAt(0, y, 0);
   });
   return null;
-}
-
-function Figure({ body, model, garments }: { body: BodyParams; model: HumanModel; garments: Garment[] }) {
-  const fit = useMemo(() => model.fit(body), [model, body]);
-  const frame = useMemo(() => bodyFrame(model, fit), [model, fit]);
-  const scanned = useMemo(() => garments.filter((g) => g.scan && g.atlasUri), [garments]);
-  return (
-    <group>
-      <Body body={body} model={model} fit={fit} />
-      <Cloths garments={scanned} frame={frame} />
-      {garments.filter((g) => !g.scan).map((g) => (
-        <GarmentMesh key={g.id} garment={g} body={body} />
-      ))}
-    </group>
-  );
 }
 
 export interface StageProps {

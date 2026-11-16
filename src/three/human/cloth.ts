@@ -52,7 +52,7 @@ export class Polar {
    * Each ring: intersect triangles with the plane t = const, then cast NT rays from the
    * section centre and keep the farthest hit (outer hull).
    */
-  build(coords: Float32Array, tris: ArrayLike<number>, centre?: (t: number) => [number, number] | null): this {
+  build(coords: Float32Array, tris: ArrayLike<number>, convex = false): this {
     const segs: number[][] = Array.from({ length: this.rings }, () => []);
     for (let k = 0; k < tris.length; k += 3) {
       const i0 = tris[k] * 3, i1 = tris[k + 1] * 3, i2 = tris[k + 2] * 3;
@@ -83,7 +83,7 @@ export class Polar {
         bmin = Math.min(bmin, s[i + 1]);
         bmax = Math.max(bmax, s[i + 1]);
       }
-      const c = centre?.(this.t0 + ring * this.step) ?? [(amin + amax) / 2, (bmin + bmax) / 2];
+      const c = [(amin + amax) / 2, (bmin + bmax) / 2];
       this.ca[ring] = c[0];
       this.cb[ring] = c[1];
       const row = ring * NT;
@@ -116,6 +116,7 @@ export class Polar {
         this.r[row + j] = -((ra * b + rb * a) / (a + b));
       }
       for (let j = 0; j < NT; j++) this.r[row + j] = Math.abs(this.r[row + j]);
+      if (convex) this.hull(row);
       valid[ring] = 1;
     }
     // Rings without a usable section copy the nearest valid one.
@@ -148,6 +149,38 @@ export class Polar {
       this.hb[ring] = hb;
     }
     return this;
+  }
+
+  /**
+   * Replaces one section by its convex hull. Hanging cloth spans concavities (between the
+   * thighs, across the small of the back) instead of following them.
+   */
+  private hull(row: number) {
+    const pts: [number, number][] = [];
+    for (let j = 0; j < NT; j++) pts.push([this.r[row + j] * COS[j], this.r[row + j] * SIN[j]]);
+    // Points are already in angular order; a single pass with back-tracking gives the hull.
+    const cross = (o: number[], a: number[], b: number[]) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+    let start = 0;
+    for (let j = 1; j < NT; j++) if (pts[j][0] > pts[start][0]) start = j;
+    const h: [number, number][] = [];
+    for (let k = 0; k <= NT; k++) {
+      const p = pts[(start + k) % NT];
+      while (h.length >= 2 && cross(h[h.length - 2], h[h.length - 1], p) <= 0) h.pop();
+      h.push(p);
+    }
+    for (let j = 0; j < NT; j++) {
+      const dx = COS[j], dy = SIN[j];
+      let best = this.r[row + j];
+      for (let i = 0; i + 1 < h.length; i++) {
+        const ex = h[i + 1][0] - h[i][0], ey = h[i + 1][1] - h[i][1];
+        const den = dx * ey - dy * ex;
+        if (Math.abs(den) < 1e-12) continue;
+        const r = (h[i][0] * ey - h[i][1] * ex) / den;
+        const u = (h[i][0] * dy - h[i][1] * dx) / den;
+        if (u >= -1e-6 && u <= 1.000001 && r > best) best = r;
+      }
+      this.r[row + j] = best;
+    }
   }
 
   private pos(t: number): [number, number, number] {
@@ -244,7 +277,7 @@ export function bodyFrame(model: HumanModel, fit: FittedBody): BodyFrame {
   const yxz = new Float32Array(pos.length);
   for (let i = 0; i < pos.length; i += 3) (yxz[i] = pos[i + 1]), (yxz[i + 1] = pos[i]), (yxz[i + 2] = pos[i + 2]);
 
-  const trunk = new Polar(0.03, neckY + 0.05, STEP).build(yxz, trunkTris);
+  const trunk = new Polar(0.03, neckY + 0.05, STEP).build(yxz, trunkTris, true);
   const legs = {} as BodyFrame['legs'];
   const arms = {} as BodyFrame['arms'];
   for (const sgn of [-1, 1] as const) {
@@ -265,29 +298,36 @@ export function bodyFrame(model: HumanModel, fit: FittedBody): BodyFrame {
       local[i + 1] = x * u.x + y * u.y + z * u.z;
       local[i + 2] = x * v.x + y * v.y + z * v.z;
     }
-    arms[sgn] = { origin, d, u, v, length, polar: new Polar(-0.02, length, STEP).build(local, armTris[sgn]) };
+    arms[sgn] = { origin, d, u, v, length, polar: new Polar(-0.075, length, STEP).build(local, armTris[sgn]) };
   }
   const bustY = meanY(L['bust-circ']);
   return { H, waistY: meanY(L['waist-circ']), hipY: meanY(L['hips-circ']), bustY, crotchY, shoulderY, armpitY: shoulderY - 0.072 * H, neckY, trunk, legs, arms };
 }
 
-/** Half-widths claimed by garments already on the body, per body part and height. */
+/**
+ * Space claimed by garments already on the body: per body part, height and direction, the
+ * radius of the outermost cloth so far. Outer layers are pushed beyond it.
+ */
 export class Occupancy {
   private maps = new Map<string, Float32Array>();
-  private bin(y: number) {
-    return clamp(Math.floor(y * 50), 0, 127);
+  private static bin(y: number) {
+    return clamp(Math.round(y * 80), 0, 191);
   }
-  note(part: string, y: number, half: number) {
+  note(part: string, y: number, j: number, r: number) {
     let m = this.maps.get(part);
-    if (!m) this.maps.set(part, (m = new Float32Array(128)));
-    const b = this.bin(y);
-    if (half > m[b]) m[b] = half;
+    if (!m) this.maps.set(part, (m = new Float32Array(192 * NT)));
+    const i = Occupancy.bin(y) * NT + j;
+    if (r > m[i]) m[i] = r;
   }
-  half(part: string, y: number): number {
-    return this.maps.get(part)?.[this.bin(y)] ?? 0;
+  radius(part: string, y: number, j: number): number {
+    return this.maps.get(part)?.[Occupancy.bin(y) * NT + j] ?? 0;
   }
   absorb(o: Occupancy) {
-    for (const [part, m] of o.maps) for (let b = 0; b < 128; b++) if (m[b]) this.note(part, (b + 0.5) / 50, m[b]);
+    for (const [part, m] of o.maps) {
+      let mine = this.maps.get(part);
+      if (!mine) this.maps.set(part, (mine = new Float32Array(192 * NT)));
+      for (let i = 0; i < m.length; i++) if (m[i] > mine[i]) mine[i] = m[i];
+    }
   }
 }
 
@@ -298,6 +338,8 @@ export interface ClothOptions {
   layer: number;
   /** User size adjustment; 1 = scaled to fit the wearer's chest or waist. */
   size: number;
+  /** Skin-tight base layer: follows the body exactly and claims no space. */
+  tight?: boolean;
 }
 
 const row = (arr: number[], py: number) => {
@@ -319,7 +361,7 @@ export interface Cloth {
   occupied: Occupancy;
 }
 
-export function buildCloth(frame: BodyFrame, scan: GarmentScan, { layer, size, under }: ClothOptions): Cloth {
+export function buildCloth(frame: BodyFrame, scan: GarmentScan, { layer, size, under, tight }: ClothOptions): Cloth {
   const occupied = new Occupancy();
   const ease = 0.004 + layer;
   const lower = scan.kind === 'trousers' || scan.kind === 'skirt';
@@ -396,10 +438,8 @@ export function buildCloth(frame: BodyFrame, scan: GarmentScan, { layer, size, u
     const gh = Math.max(1, (hi - lo) / 2);
     const gc = (hi + lo) / 2;
     const bh = polar.half(y);
-    let ch = clamp(gh * k, bh + ease, bh * MAX_WIDEN);
+    const ch = tight ? bh + ease : clamp(gh * k, bh + ease, bh * MAX_WIDEN);
     const inside = py >= 0 && py <= lastRow;
-    if (under && inside) ch = Math.max(ch, under.half(key, y) + 0.004);
-    if (claim && inside) occupied.note(key, y, ch);
     const f = ch / bh;
     const fz = 1 + (f - 1) * 0.8;
     const dh = polar.depthHalf(y) * fz + ease * 0.5;
@@ -409,9 +449,24 @@ export function buildCloth(frame: BodyFrame, scan: GarmentScan, { layer, size, u
       const r = polar.radius(y, j) + ease * 0.6;
       const ex = COS[j] / ch, ez = SIN[j] / dh;
       const re = 1 / Math.sqrt(ex * ex + ez * ez);
-      const ax = (r * COS[j] * f * (1 - relax) + re * COS[j] * relax) * shrink;
-      const az = (r * SIN[j] * fz * (1 - relax) + re * SIN[j] * relax) * shrink;
-      return [ca + ax, y, cb + az, gc + clamp(ax / ch, -0.985, 0.985) * gh, py];
+      let ax = r * COS[j] * f * (1 - relax) + re * COS[j] * relax;
+      let az = r * SIN[j] * fz * (1 - relax) + re * SIN[j] * relax;
+      // Never inside the body, nor inside a garment already worn here.
+      const want = Math.max(r, under && inside ? under.radius(key, y, j) + 0.0025 : 0);
+      const have = Math.hypot(ax, az);
+      if (have < want) (ax *= want / have), (az *= want / have);
+      const out = Math.max(have, want);
+      if (inside && claim && !tight) {
+        occupied.note(key, y, j, out * shrink);
+        // Leg tubes also claim space in the trunk hull's frame, for skirts and coats over them.
+        if (key !== 'trunk') {
+          const tx = ca + ax - trunk.centreA(y), tz = cb + az - trunk.centreB(y);
+          const tj = Math.round((Math.atan2(tz, tx) / (Math.PI * 2)) * NT + NT) % NT;
+          const tr = Math.hypot(tx, tz);
+          for (const d of [-1, 0, 1]) occupied.note('trunk', y, (tj + d + NT) % NT, tr);
+        }
+      }
+      return [ca + ax * shrink, y, cb + az * shrink, gc + clamp(ax / ch, -0.985, 0.985) * gh, py];
     };
   };
 
@@ -450,7 +505,7 @@ export function buildCloth(frame: BodyFrame, scan: GarmentScan, { layer, size, u
       const lenP = Math.hypot(sl.tip[0] - sl.origin[0], sl.tip[1] - sl.origin[1]);
       const cuff = Math.min(lenP * kLen, arm.length * 0.99);
       const dx = (sl.tip[0] - sl.origin[0]) / lenP, dy = (sl.tip[1] - sl.origin[1]) / lenP;
-      const ts = levels(-0.015, cuff);
+      const ts = levels(-0.07, cuff);
       grid(ts.length, (i, j) => {
         const t = ts[i];
         const tp = t / (lenP * kLen);
@@ -460,8 +515,10 @@ export function buildCloth(frame: BodyFrame, scan: GarmentScan, { layer, size, u
         const f = ch / bh;
         const r = (arm.polar.radius(t, j) + ease * 0.6) * f;
         const a = arm.polar.centreA(t) + r * COS[j], b = arm.polar.centreB(t) + r * SIN[j];
-        const across = station(sl.centre, tp) + clamp((r * COS[j]) / ch, -0.9, 0.9) * gh;
-        const tt = Math.min(tp, 0.985) * lenP;
+        // Lookups stay well inside the photographed sleeve so its alpha never cuts holes; the
+        // cuff edge comes from the geometry.
+        const across = station(sl.centre, tp) + clamp((r * COS[j]) / ch, -0.72, 0.72) * gh;
+        const tt = clamp(tp, 0.1, 0.96) * lenP;
         return [
           arm.origin.x + arm.d.x * t + arm.u.x * a + arm.v.x * b,
           arm.origin.y + arm.d.y * t + arm.u.y * a + arm.v.y * b,

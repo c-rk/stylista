@@ -1,0 +1,112 @@
+/**
+ * Procedural garment silhouettes for pieces without a photo (starter wardrobe, colour-only
+ * pieces, base layer). They are rasterised to a matte and pushed through the same scanner as
+ * photos, so photo and non-photo garments share one draping path.
+ */
+import type { GarmentShape } from '@/types';
+import { GarmentScan, ScanKind, scanGarment } from './garment';
+
+type Pt = [number, number];
+const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
+
+/** Even-odd scanline fill of closed polygons into a float matte. */
+function fill(w: number, h: number, polys: Pt[][]): Float32Array {
+  const a = new Float32Array(w * h);
+  for (let y = 0; y < h; y++) {
+    const xs: number[] = [];
+    for (const poly of polys)
+      for (let i = 0; i < poly.length; i++) {
+        const [x0, y0] = poly[i], [x1, y1] = poly[(i + 1) % poly.length];
+        if (y0 <= y + 0.5 !== y1 <= y + 0.5) xs.push(x0 + ((y + 0.5 - y0) / (y1 - y0)) * (x1 - x0));
+      }
+    xs.sort((p, q) => p - q);
+    for (let k = 0; k + 1 < xs.length; k += 2) for (let x = Math.max(0, Math.round(xs[k])); x < Math.min(w, Math.round(xs[k + 1])); x++) a[y * w + x] = 1;
+  }
+  return a;
+}
+
+const mirror = (pts: Pt[], cx: number): Pt[] => [...pts, ...[...pts].reverse().map(([x, y]): Pt => [2 * cx - x, y])];
+
+export type SyntheticKind = 'top' | 'outerwear' | 'dress' | 'trousers' | 'skirt' | 'briefs' | 'bra';
+
+/**
+ * Builds the matte in "worn, frontal" proportions: 1 px is about 2.6 mm on a 170 cm body, with
+ * a chest half-width of 60 px.
+ */
+function draw(kind: SyntheticKind, s: GarmentShape): { w: number; h: number; alpha: Float32Array; scanKind: ScanKind; crotchY?: number; sleeveless?: boolean } {
+  const W = 520, cx = W / 2, M = 6;
+  const hw = 60;
+  if (kind === 'trousers' || kind === 'briefs') {
+    const rise = 95;
+    const leg = kind === 'briefs' ? 7 : lerp(46, 292, s.length);
+    const hem = kind === 'briefs' ? 30 : lerp(13, 36, s.fit) + (1 - s.length) * 14;
+    const footX = kind === 'briefs' ? 36 : lerp(40, 27, s.length);
+    const h = Math.round(rise + leg) + M * 2;
+    const left: Pt[] = [[cx - 50, M], [cx - 64, M + 68], [cx - footX - hem, M + rise + leg], [cx - footX + hem, M + rise + leg], [cx - 1.5, M + rise - (kind === 'briefs' ? 0 : 4)]];
+    return { w: W, h, alpha: fill(W, h, [mirror(left, cx)]), scanKind: 'trousers', crotchY: M + rise };
+  }
+  if (kind === 'skirt') {
+    const len = lerp(105, 370, s.length);
+    const h = Math.round(len) + M * 2;
+    const left: Pt[] = [[cx - 48, M], [cx - 64, M + 72], [cx - 66 - s.flare * len * 0.32, M + len]];
+    return { w: W, h, alpha: fill(W, h, [mirror(left, cx)]), scanKind: 'skirt' };
+  }
+  if (kind === 'bra') {
+    const h = 96 + M * 2;
+    const left: Pt[] = [[cx - 30, M], [cx - 44, M], [cx - 58, M + 52], [cx - 56, M + 92]];
+    // Scooped neckline between the straps.
+    const scoop: Pt[] = Array.from({ length: 9 }, (_, i): Pt => [cx - 30 + (60 * i) / 8, M + Math.sin((i / 8) * Math.PI) * 44]).reverse();
+    const outer = mirror(left, cx);
+    return { w: W, h, alpha: fill(W, h, [[...outer, ...scoop]]), scanKind: 'top', sleeveless: true };
+  }
+  // Tops, jackets, dresses.
+  const coat = kind === 'outerwear';
+  const dress = kind === 'dress';
+  const loose = hw * (1 + s.fit * 0.3) + (coat ? 6 : 0);
+  const len = dress ? lerp(250, 525, s.length) : coat ? lerp(150, 395, s.length) : lerp(118, 262, s.length);
+  const hemHalf = loose + (dress ? s.flare * Math.max(0, len - 150) * 0.36 : s.fit * 8);
+  const h = Math.round(len) + M * 2;
+  const armpit = 64;
+  let sleeveBottom = 0;
+  const body: Pt[] = [[cx - 23, M + 2], [cx - hw - 10, M + 15]];
+  if (s.sleeve > 0.03) {
+    const L = lerp(34, 214, s.sleeve), wide = 23 + s.fit * 9 + (coat ? 4 : 0), cuff = lerp(wide, 15 + s.fit * 8, s.sleeve);
+    // Sleeve held 48 degrees off vertical, clear of the side seam, so the scanner separates it.
+    const dx = -Math.sin(0.84), dy = Math.cos(0.84);
+    sleeveBottom = M + 34 + dy * L + cuff + 4;
+    const sx = cx - hw - 12, sy = M + 34;
+    // Upper (outer) cuff corner first, then the lower one, to keep the outline simple.
+    body.push([sx + dx * L - dy * cuff, sy + dy * L + dx * cuff], [sx + dx * L + dy * cuff, sy + dy * L - dx * cuff]);
+  }
+  body.push([cx - loose, M + armpit], [cx - lerp(loose, loose * 0.92, dress ? 1 - s.fit : 0), M + 150], [cx - hemHalf, M + len]);
+  const outer = mirror(body, cx);
+  const dip = coat ? 30 : 17;
+  const scoop: Pt[] = Array.from({ length: 9 }, (_, i): Pt => [cx - 23 + (46 * i) / 8, M + 2 + Math.sin((i / 8) * Math.PI) * dip]).reverse();
+  const H2 = Math.round(Math.max(h, sleeveBottom + M));
+  return { w: W, h: H2, alpha: fill(W, H2, [[...outer, ...scoop]]), scanKind: dress ? 'dress' : 'top', sleeveless: s.sleeve <= 0.03 };
+}
+
+export interface SyntheticGarment {
+  scan: GarmentScan;
+  /** White RGBA atlas (front | back); tint it with the fabric colour. */
+  atlas: Uint8Array;
+  width: number;
+  height: number;
+}
+
+const cache = new Map<string, SyntheticGarment>();
+
+export function syntheticGarment(kind: SyntheticKind, shape: GarmentShape): SyntheticGarment {
+  const q = (v: number) => Math.round(v * 40) / 40;
+  const key = `${kind}|${q(shape.sleeve)}|${q(shape.length)}|${q(shape.fit)}|${q(shape.flare)}`;
+  const hit = cache.get(key);
+  if (hit) return hit;
+  const { w, h, alpha, scanKind, crotchY, sleeveless } = draw(kind, shape);
+  const white = new Uint8Array(w * h * 3).fill(255);
+  const res = scanGarment({ width: w, height: h, channels: 3, data: white }, alpha, scanKind, { crotchY, sleeveless });
+  if (!res) throw new Error(`synthetic ${kind} produced no silhouette`);
+  const out = { scan: res.scan, atlas: res.atlas, width: res.scan.width * 2, height: res.scan.height };
+  if (cache.size > 60) cache.clear();
+  cache.set(key, out);
+  return out;
+}

@@ -114,7 +114,7 @@ export interface ScanResult {
   atlas: Uint8Array;
 }
 
-export function scanGarment(img: Pixels, alphaFull: Float32Array, forced?: ScanKind): ScanResult | null {
+export function scanGarment(img: Pixels, alphaFull: Float32Array, forced?: ScanKind, hints: { crotchY?: number; sleeveless?: boolean } = {}): ScanResult | null {
   // ---- crop to the matte's bounding box ------------------------------------------------
   const W0 = img.width, H0 = img.height;
   let x0 = W0, x1 = -1, y0 = H0, y1 = -1;
@@ -159,6 +159,9 @@ export function scanGarment(img: Pixels, alphaFull: Float32Array, forced?: ScanK
       }
     }
   }
+
+  // A caller that knows the crotch row (procedural silhouettes) passes it in image rows.
+  if (hints.crotchY !== undefined) crotchY = Math.round(hints.crotchY - y0);
 
   const left = new Array(h).fill(cx), right = new Array(h).fill(cx);
   const sleeves: Limb[] = [];
@@ -225,6 +228,7 @@ export function scanGarment(img: Pixels, alphaFull: Float32Array, forced?: ScanK
     }
     const detach = threeRun.findIndex((t, y) => t && y > first + span * 0.08 && y < first + span * 0.7 && threeRun[Math.min(h - 1, y + 3)]);
     if (detach > 0 && (bestY < 0 || detach < bestY + d)) bestY = detach;
+    if (hints.sleeveless) bestY = -1;
     if (bestY > 0) {
       armpitY = bestY;
       const torsoHalf = median(sm.slice(armpitY, Math.min(last, armpitY + Math.max(3, Math.round(span * 0.06)))));
