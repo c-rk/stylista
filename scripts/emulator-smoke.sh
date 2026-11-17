@@ -14,3 +14,4 @@ done
 adb logcat -d > emulator-out/logcat.txt
 echo "===== crash / JS errors ====="
 grep -E "AndroidRuntime|FATAL|ReactNativeJS|libc  |DEBUG   :|Abort message|com.stylista|SoLoader|UnsatisfiedLink|Exception" emulator-out/logcat.txt | grep -v "^.*I ActivityManager: Start proc" | head -150
+adb shell pidof com.stylista.app > /dev/null || { echo "App is not running after launch"; exit 1; }

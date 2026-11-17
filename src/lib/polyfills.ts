@@ -57,4 +57,8 @@ if (typeof g.TextEncoder !== 'function') {
   };
 }
 
+// Some npm packages call Node's process.emitWarning, absent in React Native.
+const proc = (globalThis as unknown as { process?: { emitWarning?: unknown } }).process;
+if (proc && typeof proc.emitWarning !== 'function') proc.emitWarning = () => {};
+
 export {};
