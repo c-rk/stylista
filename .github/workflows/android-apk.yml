@@ -3,6 +3,7 @@ name: Android APK
 on:
   push:
     branches: ['claude/3d-virtual-try-on-gvgkj2', 'main']
+    paths-ignore: ['**.md', 'docs/**']
   workflow_dispatch:
 
 permissions:

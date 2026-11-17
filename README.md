@@ -10,17 +10,25 @@ on the model from any angle. All data stays on the device.
 - three.js through `@react-three/fiber` (expo-gl on device, WebGL on web)
 - Reanimated for UI motion, zustand + AsyncStorage for state, expo-file-system for images
 
+## Try it on Android
+
+Each push builds an APK in GitHub Actions and publishes it under
+[Releases → Stylista test build](../../releases/tag/apk-latest) as `stylista.apk`
+(arm64, debug-signed, about 95 MB). Download it on the phone, allow installs from the
+browser, open it.
+
 ## Run
 
 ```bash
 npm install
-npx expo start            # dev server; press i / a, or w for the web preview
+npx expo start            # dev server; press w for the web preview
 npx tsc --noEmit          # typecheck
 npx expo lint             # lint
+npx expo prebuild --platform android && (cd android && ./gradlew assembleRelease)   # local APK
 ```
 
-Camera, clipboard images, haptics and speech need a development build or Expo Go on a
-real device. Store builds: `eas build -p ios` / `eas build -p android`.
+`patches/` holds a small fix that lets `onnxruntime-react-native` build with Gradle 9; it is
+applied on `npm install`.
 
 ## Layout
 
@@ -40,7 +48,12 @@ real device. Store builds: `eas build -p ios` / `eas build -p android`.
 Nothing leaves the phone. Two bundled networks (9.4 MB total) run through ONNX Runtime; the
 rest is geometry.
 
-**Body.** MakeHuman CC0 base mesh (13k vertices) with 28 morph targets. Morph weights are
+**Rendering.** Studio image-based lighting with a float-target guard, a shadow-mapped key
+light, physically based skin with cavity shading and lip/brow tints, procedural irises,
+eyelashes, strand-textured hair shells, fabric sheen with a weave normal map.
+
+**Body.** MakeHuman CC0 base mesh (13k vertices) with 28 morph targets, arms lowered from the
+rest pose by weighted rotation about the shoulders. Morph weights are
 solved so tape-measure loops on the mesh match the requested chest, waist, hips, shoulders and
 inside leg (within about 0.3 cm, about 15 ms). A fitted top and shorts are always rendered; the
 model is never shown unclothed.
@@ -77,12 +90,15 @@ Pieces without a photo use procedural silhouettes through the same path.
 
 ## Not verified / limits
 
-- Not run on a physical device: camera screens, ONNX Runtime native module, speed on Hermes.
+- The APK builds, but has not been run on a phone or emulator from here: camera screens,
+  the ONNX Runtime native module, GL features and speed on Hermes are unverified.
 - The back of a garment is inferred from the front photo.
 - A garment photographed on a person is segmented together with the person.
 - Sleeves lying over the torso in the photo are not separated.
-- Shoes and accessories are parametric shapes coloured from the photo, not reconstructions.
-- Skin is a flat tone plus the projected face; hair is a simple cap.
+- Shoes are lofted around the wearer's foot and coloured from the photo; accessories are
+  parametric shapes. Neither is reconstructed from the photo.
+- Skin has no photographic texture apart from the projected face; hair is short or
+  shoulder-length shells only.
 - Cloud "HD reconstruction" is an opt-in setting with no endpoint configured.
 - App icon and splash are Expo defaults; bundle id `com.stylista.app` is a placeholder.
 
