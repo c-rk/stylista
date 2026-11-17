@@ -24,9 +24,10 @@ function loadRuntime(): Promise<Ort> {
     const g = globalThis as unknown as { ort?: Ort; document: Document };
     if (g.ort) return resolve(g.ort);
     const el = g.document.createElement('script');
-    el.src = '/ort/ort.wasm.min.js';
+    const base = process.env.EXPO_BASE_URL ?? '';
+    el.src = `${base}/ort/ort.wasm.min.js`;
     el.onload = () => {
-      g.ort!.env.wasm.wasmPaths = '/ort/';
+      g.ort!.env.wasm.wasmPaths = `${base}/ort/`;
       g.ort!.env.wasm.numThreads = 1;
       resolve(g.ort!);
     };
