@@ -215,100 +215,192 @@ function Accessory({ garment, anchors }: { garment: Garment; anchors: Anchors })
 // ---- body ------------------------------------------------------------------------------
 
 let strandTexture: THREE.DataTexture | undefined;
-/** Vertical strand pattern: alpha thins the outer shells into wisps, rgb varies strand tone. */
-function strands(): THREE.DataTexture {
+/**
+ * Tiling normal map of fine parallel strands (variation across u, constant along v). It breaks
+ * up highlights the way real hair does without cutting holes in the surface.
+ */
+function strandNormals(): THREE.DataTexture {
   if (strandTexture) return strandTexture;
-  const w = 512, h = 4;
-  const data = new Uint8Array(w * h * 4);
+  const w = 256, h = 8;
   let seed = 7;
   const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
-  const cover = Array.from({ length: w }, rnd), tone = Array.from({ length: w }, rnd);
+  const raw = Array.from({ length: w }, rnd);
+  // Smooth the noise a little so strands are a few texels wide.
+  const height = raw.map((_, i) => (raw[i] * 2 + raw[(i + 1) % w] + raw[(i + w - 1) % w]) / 4);
+  const data = new Uint8Array(w * h * 4);
   for (let x = 0; x < w; x++) {
-    const a = (cover[x] + cover[(x + 1) % w]) / 2;
-    const t = 0.62 + 0.38 * ((tone[x] + tone[(x + 1) % w] + tone[(x + 2) % w]) / 3);
-    for (let y = 0; y < h; y++) data.set([t * 255, t * 255, t * 255, a * 255], (y * w + x) * 4);
+    const dx = (height[(x + 1) % w] - height[(x + w - 1) % w]) * 2.2;
+    const l = Math.hypot(dx, 1);
+    for (let y = 0; y < h; y++) data.set([Math.round((-dx / l) * 127 + 128), 128, Math.round((1 / l) * 127 + 128), 255], (y * w + x) * 4);
   }
   const t = new THREE.DataTexture(data, w, h, THREE.RGBAFormat);
   t.wrapS = t.wrapT = THREE.RepeatWrapping;
   t.magFilter = THREE.LinearFilter;
-  t.minFilter = THREE.LinearFilter;
+  t.minFilter = THREE.LinearMipmapLinearFilter;
+  t.generateMipmaps = true;
   t.needsUpdate = true;
   return (strandTexture = t);
 }
 
-/** Shell lifts off the scalp (metres at 1.7 m stature) and the strand coverage cut for each. */
-const HAIR_SHELLS: [number, number][] = [[0.003, 0.02], [0.006, 0.3], [0.009, 0.5], [0.012, 0.68]];
+/** Splits every triangle into four; positions, normals and uvs are interpolated at edge midpoints. */
+function subdivide(g: THREE.BufferGeometry): THREE.BufferGeometry {
+  const pos = g.attributes.position.array as Float32Array, nor = g.attributes.normal.array as Float32Array;
+  const idx = g.index!.array;
+  const P = Array.from(pos), N = Array.from(nor);
+  const mids = new Map<number, number>();
+  const n0 = pos.length / 3;
+  const mid = (a: number, b: number) => {
+    const key = a < b ? a * n0 * 4 + b : b * n0 * 4 + a;
+    let m = mids.get(key);
+    if (m === undefined) {
+      m = P.length / 3;
+      for (let c = 0; c < 3; c++) {
+        P.push((P[a * 3 + c] + P[b * 3 + c]) / 2);
+        N.push((N[a * 3 + c] + N[b * 3 + c]) / 2);
+      }
+      mids.set(key, m);
+    }
+    return m;
+  };
+  const out: number[] = [];
+  for (let t = 0; t < idx.length; t += 3) {
+    const a = idx[t], b = idx[t + 1], c = idx[t + 2];
+    const ab = mid(a, b), bc = mid(b, c), ca = mid(c, a);
+    out.push(a, ab, ca, ab, b, bc, ca, bc, c, ab, bc, ca);
+  }
+  for (let i = n0; i < N.length / 3; i++) {
+    const l = Math.hypot(N[i * 3], N[i * 3 + 1], N[i * 3 + 2]) || 1;
+    N[i * 3] /= l;
+    N[i * 3 + 1] /= l;
+    N[i * 3 + 2] /= l;
+  }
+  const r = new THREE.BufferGeometry();
+  r.setAttribute('position', new THREE.BufferAttribute(new Float32Array(P), 3));
+  r.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(N), 3));
+  r.setIndex(out);
+  g.dispose();
+  return r;
+}
+
+const smooth01 = (a: number, b: number, x: number) => {
+  const t = Math.min(1, Math.max(0, (x - a) / (b - a)));
+  return t * t * (3 - 2 * t);
+};
 
 /**
- * Hair as stacked shells: the innermost is solid, outer ones keep progressively fewer strands,
- * which gives volume and a soft outline. Long hair adds sheets falling behind the shoulders.
+ * Sculpted hair: the scalp region of the head mesh, cut along a natural hairline (forehead,
+ * temples, around the ears, nape) and lifted off the head, thin at the hairline and fuller at
+ * the crown. Long hair adds a curtain from ear level to below the shoulders. Shading comes from
+ * a strand normal map, root-to-tip tone and sheen, so the surface stays solid (no cut-out shells).
  */
 function Hair({ body, model, fit, anchors, frame }: { body: BodyParams; model: HumanModel; fit: FittedBody; anchors: Anchors; frame: BodyFrame }) {
   const { cy, cz, a, b, h } = anchors.head;
   const long = body.hair === 'long';
-  const { shells, plane } = useMemo(() => {
+  const pieces = useMemo(() => {
     const k = anchors.H / 1.7;
-    const base = setGeometry(model, fit, 'body', (v) => fit.positions[v * 3 + 1] > cy - h * 1.3);
-    const bp = base.attributes.position, bn = base.attributes.normal;
-    const list = HAIR_SHELLS.map(([lift]) => {
-      const g = base.clone();
-      const p = g.attributes.position;
-      const uv = new Float32Array(p.count * 2);
-      const d = (lift + (long ? 0.006 : 0)) * k;
-      for (let i = 0; i < p.count; i++) {
-        p.setXYZ(i, bp.getX(i) + bn.getX(i) * d, bp.getY(i) + bn.getY(i) * d, bp.getZ(i) + bn.getZ(i) * d);
-        // Strands run from the crown downward: u wraps around the head.
-        uv[i * 2] = (Math.atan2(bp.getX(i), bp.getZ(i) - cz) / (Math.PI * 2)) * 5;
-        uv[i * 2 + 1] = (bp.getY(i) - cy) / h;
-      }
-      g.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
-      return g;
-    });
-    base.dispose();
-    if (long) {
-      // Sheets from ear level to below the shoulders, wrapping the back and sides.
-      const top = cy - h * 0.1, bottom = frame.shoulderY - 0.13 * anchors.H;
-      HAIR_SHELLS.forEach(([lift], si) => {
-        const rings: Ring[] = [];
-        const n = 22;
-        for (let i = 0; i <= n; i++) {
-          const y = bottom + ((top - bottom) * i) / n;
-          const t = Math.min(1, Math.max(0, (y - (anchors.neck.y - 0.02)) / (top - anchors.neck.y + 0.02)));
-          const tz = frame.trunk.centreB(y), td = frame.trunk.depthHalf(y), th = frame.trunk.half(y);
-          const off = (lift + 0.012) * k;
-          // Head ellipse above the neck, the upper back's section below it.
-          const back = (cz - b * 1.02) * t + (tz - td) * (1 - t) - off;
-          const half = a * 0.98 * t + Math.min(th * 0.8, a * 1.5) * (1 - t) + off;
-          const centre = cz * t + (tz - td * 0.35) * (1 - t);
-          const taper = i < 3 ? 0.82 + 0.06 * i : 1;
-          rings.push({ y, cx: 0, cz: centre, a: half * taper, b: Math.max(0.03, centre - back) });
-        }
-        const g = loft(rings, { segments: 26, arc: [Math.PI * 1.08, Math.PI * 1.92] });
-        const uv = g.attributes.uv;
-        for (let i = 0; i < uv.count; i++) uv.setXY(i, uv.getX(i) * 3 + si * 0.37, uv.getY(i));
-        list.push(g);
-      });
+    const pos = fit.positions;
+    const parts = model.array('parts') as Uint8Array;
+    /** Hairline height for an azimuth around the head (0 = straight ahead). */
+    const hairline = (phi: number) => {
+      const p = Math.abs(phi);
+      const front = cy + h * 0.4, temple = cy + h * 0.1, nape = cy - h * (long ? 1.5 : 1.3);
+      return front + (temple - front) * smooth01(0.2, 1.1, p) + (nape - temple) * smooth01(1.7, 2.6, p);
+    };
+    const az = (x: number, z: number) => Math.atan2(x, z - cz);
+    // Ears stay uncovered: the band at the side of the head around ear height.
+    // The ear itself (outboard of the skull), not the skin around it.
+    const ear = (x: number, y: number, z: number) => Math.abs(x) > a * 1.0 && y < cy + h * 0.02 && y > cy - h * 0.62 && z < cz + b * 0.35 && z > cz - b * 0.45;
+    const keep = (v: number) => {
+      const x = pos[v * 3], y = pos[v * 3 + 1], z = pos[v * 3 + 2];
+      // Generous region: the hair surface continues past the hairline but sinks under the
+      // skin there, so the visible edge is the smooth intersection of two surfaces.
+      // Head and upper neck (the head/neck weight boundary would leave a straight cut at the back).
+      return (parts[v * 6 + 1] > 40 || (Math.abs(x) < a * 1.1 && z < cz + b * 0.2)) && y > cy - h * 1.9 && y > hairline(az(x, z)) - h * 0.3 && !ear(x, y, z);
+    };
+    // Two midpoint subdivisions: the hairline is where the hair surface crosses the skin, and a
+    // finer mesh makes that crossing a smooth curve instead of following coarse triangles.
+    const cap = subdivide(subdivide(setGeometry(model, fit, 'body', keep)));
+    const p = cap.attributes.position, n = cap.attributes.normal;
+    const uv = new Float32Array(p.count * 2);
+    const col = new Float32Array(p.count * 3);
+    const base = (long ? 0.02 : 0.016) * k;
+    for (let i = 0; i < p.count; i++) {
+      const x = p.getX(i), y = p.getY(i), z = p.getZ(i);
+      const phi = az(x, z);
+      // 0 at the hairline, 1 a little way above it: thin edges that meet the skin.
+      const edge = y - hairline(phi);
+      const inside = smooth01(0, h * 0.3, edge);
+      const crown = smooth01(cy, cy + h, y);
+      // Positive lift above the hairline, a slight sink (hidden under the skin) below it.
+      const d = edge < 0 ? -0.003 * k * smooth01(0, h * 0.05, -edge) : base * (0.1 + 0.9 * inside) * (0.8 + 0.45 * crown);
+      p.setXYZ(i, x + n.getX(i) * d, y + n.getY(i) * d, z + n.getZ(i) * d);
+      // Strands run from the crown outward: u around the head, v down from the top.
+      uv[i * 2] = (phi / (Math.PI * 2)) * 14;
+      uv[i * 2 + 1] = (cy + h - y) * 4;
+      const tone = 0.72 + 0.28 * inside;
+      col.set([tone, tone, tone], i * 3);
     }
-    const front = new THREE.Vector3(0, cy + h * 0.56, cz + b * 0.86);
-    const back = new THREE.Vector3(0, cy - h * (long ? 0.2 : 0.5), cz - b * 0.8);
-    const normal = new THREE.Vector3(0, front.z - back.z, -(front.y - back.y)).normalize();
-    return { shells: list, plane: new THREE.Plane().setFromNormalAndCoplanarPoint(normal, front) };
+    cap.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+    cap.setAttribute('color', new THREE.BufferAttribute(col, 3));
+    cap.computeVertexNormals();
+    const list = [cap];
+    if (long) {
+      // Curtain from ear level down past the shoulders, wrapping sides and back.
+      const top = cy - h * 0.6, bottom = frame.shoulderY - 0.12 * anchors.H;
+      const rings: Ring[] = [];
+      const n2 = 26;
+      for (let i = 0; i <= n2; i++) {
+        const y = bottom + ((top - bottom) * i) / n2;
+        const t = Math.min(1, Math.max(0, (y - (anchors.neck.y - 0.03)) / (top - anchors.neck.y + 0.03)));
+        const tz = frame.trunk.centreB(y), td = frame.trunk.depthHalf(y), th = frame.trunk.half(y);
+        const off = 0.014 * k;
+        const backZ = (cz - b * 1.02) * t + (tz - td) * (1 - t) - off;
+        const half = (a * 0.95 + base) * t + Math.min(th * 0.62, a * 1.25) * (1 - t) + off * 0.5;
+        const centre = cz * t + (tz - td * 0.2) * (1 - t);
+        // Ends taper and round off over the last few rings.
+        const end = smooth01(0, 4, i);
+        rings.push({ y, cx: 0, cz: centre, a: half * (0.86 + 0.14 * end), b: Math.max(0.03, centre - backZ) * (0.9 + 0.1 * end) });
+      }
+      const g = loft(rings, { segments: 40, arc: [Math.PI * 1.16, Math.PI * 1.84] });
+      const gp = g.attributes.position;
+      const guv = new Float32Array(gp.count * 2);
+      const gcol = new Float32Array(gp.count * 3);
+      for (let i = 0; i < gp.count; i++) {
+        guv[i * 2] = (Math.atan2(gp.getX(i), gp.getZ(i) - cz) / (Math.PI * 2)) * 14;
+        guv[i * 2 + 1] = (cy + h - gp.getY(i)) * 4;
+        const tip = 0.82 + 0.18 * smooth01(bottom, bottom + 0.08, gp.getY(i));
+        gcol.set([tip, tip, tip], i * 3);
+      }
+      g.setAttribute('uv', new THREE.BufferAttribute(guv, 2));
+      g.setAttribute('color', new THREE.BufferAttribute(gcol, 3));
+      list.push(g);
+    }
+    return list;
   }, [model, fit, anchors, frame, cy, cz, a, b, h, long]);
-  useDisposable(shells);
-  const map = strands();
+  useDisposable(pieces);
+  const normalMap = strandNormals();
   return (
     <group>
-      {shells.map((g, i) => {
-        const scalp = i < HAIR_SHELLS.length;
-        return (
-          <mesh key={i} geometry={g} castShadow={i % HAIR_SHELLS.length === 0}>
-            <meshStandardMaterial color={body.hairColor} map={map} alphaTest={HAIR_SHELLS[i % HAIR_SHELLS.length][1]} roughness={0.45} clippingPlanes={scalp ? [plane] : null} side={THREE.DoubleSide} />
-          </mesh>
-        );
-      })}
+      {pieces.map((g, i) => (
+        <mesh key={i} geometry={g} castShadow>
+          <meshPhysicalMaterial
+            color={body.hairColor}
+            vertexColors
+            normalMap={normalMap}
+            normalScale={HAIR_NORMAL}
+            roughness={0.5}
+            sheen={0.45}
+            sheenRoughness={0.4}
+            sheenColor="#ffffff"
+            side={THREE.DoubleSide}
+          />
+        </mesh>
+      ))}
     </group>
   );
 }
+
+const HAIR_NORMAL = new THREE.Vector2(0.9, 0.9);
 
 /** Photo coordinates for a point on the head, from the eye and chin landmarks. */
 function faceMapping(face: NonNullable<BodyParams['face']>, anchors: Anchors) {
