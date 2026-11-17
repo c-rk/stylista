@@ -58,7 +58,16 @@
           "motionPermission": "Stylista checks that your phone is upright during body capture."
         }
       ],
-      "onnxruntime-react-native"
+      "onnxruntime-react-native",
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "enableMinifyInReleaseBuilds": false,
+            "enableShrinkResourcesInReleaseBuilds": false
+          }
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true,
