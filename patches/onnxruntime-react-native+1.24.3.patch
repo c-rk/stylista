@@ -13,3 +13,26 @@ index 41b4359..3ad898b 100644
  
    // By default it will just include onnxruntime full aar package
    if (ortExtensionsEnabled) {
+diff --git a/node_modules/onnxruntime-react-native/android/src/main/java/ai/onnxruntime/reactnative/OnnxruntimeModule.java b/node_modules/onnxruntime-react-native/android/src/main/java/ai/onnxruntime/reactnative/OnnxruntimeModule.java
+index c362e6a..707ef3d 100644
+--- a/node_modules/onnxruntime-react-native/android/src/main/java/ai/onnxruntime/reactnative/OnnxruntimeModule.java
++++ b/node_modules/onnxruntime-react-native/android/src/main/java/ai/onnxruntime/reactnative/OnnxruntimeModule.java
+@@ -47,11 +47,16 @@ public class OnnxruntimeModule extends ReactContextBaseJavaModule {
+     try {
+       System.loadLibrary("onnxruntimejsi");
+       JavaScriptContextHolder jsContext = getReactApplicationContext().getJavaScriptContextHolder();
++      // ReactContext.getJSCallInvokerHolder() works with and without the bridge;
++      // getCatalystInstance() is unavailable in bridgeless mode (React Native 0.74+ new architecture).
+       CallInvokerHolderImpl jsCallInvokerHolder =
+-        (CallInvokerHolderImpl) getReactApplicationContext().getCatalystInstance().getJSCallInvokerHolder();
++        (CallInvokerHolderImpl) getReactApplicationContext().getJSCallInvokerHolder();
++      if (jsContext == null || jsContext.get() == 0 || jsCallInvokerHolder == null) {
++        return false;
++      }
+       nativeInstall(jsContext.get(), jsCallInvokerHolder);
+       return true;
+-    } catch (Exception e) {
++    } catch (Throwable e) {
+       return false;
+     }
+   }
