@@ -139,7 +139,7 @@ function ClothSurface({ cloth, map, color }: { cloth: Cloth; map: THREE.Texture;
     <group>
       {[cloth.front, cloth.back].map((g, i) => (
         <mesh key={i} geometry={g} castShadow receiveShadow>
-          <meshPhysicalMaterial map={map} color={color} alphaTest={0.5} roughness={0.92} sheen={0.18} sheenRoughness={0.7} sheenColor="#ffffff" normalMap={weave} normalScale={WEAVE_SCALE} side={THREE.DoubleSide} />
+          <meshPhysicalMaterial map={map} color={color} alphaTest={0.4} alphaToCoverage roughness={0.92} sheen={0.18} sheenRoughness={0.7} sheenColor="#ffffff" normalMap={weave} normalScale={WEAVE_SCALE} side={THREE.DoubleSide} />
         </mesh>
       ))}
     </group>

@@ -515,7 +515,7 @@ export function buildCloth(frame: BodyFrame, scan: GarmentScan, { layer, size, u
       // Below the armpits the lookup is held inside the band so side seams stay closed. Above
       // them it runs free: shoulder caps beyond the band read the photo's own shoulder line.
       const u = (ax / ch) * 0.985;
-      return [ca + ax * shrink, y, cb + az * shrink, gc + (lower || tight || y < capFrom ? clamp(u, -0.985, 0.985) : u) * gh, py];
+      return [ca + ax * shrink, y, cb + az * shrink, gc + (lower || tight || y < capFrom ? clamp(u, -0.95, 0.95) : u) * gh, py];
     };
   };
 

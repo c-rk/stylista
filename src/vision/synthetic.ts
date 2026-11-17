@@ -10,19 +10,37 @@ import { resizeFloat } from './image';
 type Pt = [number, number];
 const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
 
-/** Even-odd scanline fill of closed polygons into a float matte. */
+/**
+ * Anti-aliased even-odd fill of closed polygons into a float matte: four sub-scanlines per row,
+ * each span adding its exact horizontal pixel coverage, so outline edges are smooth gradients.
+ */
 function fill(w: number, h: number, polys: Pt[][]): Float32Array {
   const a = new Float32Array(w * h);
-  for (let y = 0; y < h; y++) {
-    const xs: number[] = [];
-    for (const poly of polys)
-      for (let i = 0; i < poly.length; i++) {
-        const [x0, y0] = poly[i], [x1, y1] = poly[(i + 1) % poly.length];
-        if (y0 <= y + 0.5 !== y1 <= y + 0.5) xs.push(x0 + ((y + 0.5 - y0) / (y1 - y0)) * (x1 - x0));
+  const SUB = 4;
+  for (let y = 0; y < h; y++)
+    for (let s = 0; s < SUB; s++) {
+      const sy = y + (s + 0.5) / SUB;
+      const xs: number[] = [];
+      for (const poly of polys)
+        for (let i = 0; i < poly.length; i++) {
+          const [x0, y0] = poly[i], [x1, y1] = poly[(i + 1) % poly.length];
+          if (y0 <= sy !== y1 <= sy) xs.push(x0 + ((sy - y0) / (y1 - y0)) * (x1 - x0));
+        }
+      xs.sort((p, q) => p - q);
+      for (let k = 0; k + 1 < xs.length; k += 2) {
+        const l = Math.max(0, xs[k]), r = Math.min(w, xs[k + 1]);
+        if (r <= l) continue;
+        const il = Math.floor(l), ir = Math.floor(r);
+        if (il === ir) {
+          a[y * w + il] += (r - l) / SUB;
+          continue;
+        }
+        a[y * w + il] += (il + 1 - l) / SUB;
+        for (let x = il + 1; x < ir && x < w; x++) a[y * w + x] += 1 / SUB;
+        if (ir < w) a[y * w + ir] += (r - ir) / SUB;
       }
-    xs.sort((p, q) => p - q);
-    for (let k = 0; k + 1 < xs.length; k += 2) for (let x = Math.max(0, Math.round(xs[k])); x < Math.min(w, Math.round(xs[k + 1])); x++) a[y * w + x] = 1;
-  }
+    }
+  for (let i = 0; i < a.length; i++) a[i] = Math.min(1, a[i]);
   return a;
 }
 
