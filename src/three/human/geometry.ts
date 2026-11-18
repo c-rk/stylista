@@ -34,7 +34,14 @@ export function setGeometry(model: HumanModel, fit: FittedBody, set: MeshSet, ke
  * cavity darkening from local concavity (defines nose, ears, fingers, navel), plus lip and
  * eyebrow tints when no face photo supplies them.
  */
-export function skinColors(model: HumanModel, fit: FittedBody, face: { eyeY: number; eyeDx: number; chinY: number; frontZ: number } | null, brow: [number, number, number]): Float32Array {
+export function skinColors(
+  model: HumanModel,
+  fit: FittedBody,
+  face: { eyeY: number; eyeDx: number; chinY: number; frontZ: number } | null,
+  brow: [number, number, number],
+  limits: { wristY: number; kneeY: number } = { wristY: -1, kneeY: -1 },
+): Float32Array {
+  const parts = model.array('parts') as Uint8Array;
   const vmap = model.array('body.vmap') as Uint16Array;
   const idx = model.array('body.idx');
   const pos = fit.positions;
@@ -60,14 +67,35 @@ export function skinColors(model: HumanModel, fit: FittedBody, face: { eyeY: num
   for (let i = 0; i < vmap.length; i++) {
     const v = vmap[i];
     let shade = 1;
+    let warm = 0, cool = 0;
     if (count[v]) {
       const c = count[v];
       const dx = sum[v * 3] / c - pos[v * 3], dy = sum[v * 3 + 1] / c - pos[v * 3 + 1], dz = sum[v * 3 + 2] / c - pos[v * 3 + 2];
       // Positive where neighbours sit above the tangent plane, i.e. in a crease.
       const concave = (dx * nrm[v * 3] + dy * nrm[v * 3 + 1] + dz * nrm[v * 3 + 2]) / (edge[v] / c);
       shade = 1 - Math.min(0.42, Math.max(-0.06, concave * 1.5));
+      // Thin, convex parts (ears, nose, fingers, knuckles) let more light scatter through and
+      // read warmer; creases get a cooler, slightly purple shadow tone.
+      warm = Math.min(1, Math.max(0, -concave * 6));
+      cool = Math.min(1, Math.max(0, concave * 3));
     }
-    let r = shade, gr = shade, b = shade;
+    let r = shade * (1 + 0.06 * warm - 0.02 * cool), gr = shade * (1 - 0.05 * warm - 0.04 * cool), b = shade * (1 - 0.06 * warm + 0.01 * cool);
+    {
+      // Blood-flow tint: cheeks, nose, ears, hands, knees and elbows are slightly redder.
+      const x = pos[v * 3], y = pos[v * 3 + 1], z = pos[v * 3 + 2];
+      let flush = 0;
+      if (face) {
+        const drop = face.eyeY - face.chinY;
+        flush += g(y - (face.eyeY - drop * 0.38), drop * 0.2) * g(Math.abs(x) - face.eyeDx * 1.25, face.eyeDx * 0.6) * (z > face.frontZ ? 0.9 : 0);
+        flush += g(y - (face.eyeY - drop * 0.32), drop * 0.12) * g(x, face.eyeDx * 0.35) * (z > face.frontZ ? 0.6 : 0);
+      }
+      const p = parts ? parts[v * 6 + 2] + parts[v * 6 + 3] : 0;
+      if (p > 128 && y < limits.wristY) flush += 0.55;
+      if (Math.abs(y - limits.kneeY) < 0.05) flush += 0.35 * g(y - limits.kneeY, 0.03);
+      r *= 1 + 0.05 * flush;
+      gr *= 1 - 0.05 * flush;
+      b *= 1 - 0.04 * flush;
+    }
     if (face) {
       const x = pos[v * 3], y = pos[v * 3 + 1], z = pos[v * 3 + 2];
       if (z > face.frontZ) {

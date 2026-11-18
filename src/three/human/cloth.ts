@@ -515,7 +515,11 @@ export function buildCloth(frame: BodyFrame, scan: GarmentScan, { layer, size, u
       // Below the armpits the lookup is held inside the band so side seams stay closed. Above
       // them it runs free: shoulder caps beyond the band read the photo's own shoulder line.
       const u = (ax / ch) * 0.985;
-      return [ca + ax * shrink, y, cb + az * shrink, gc + (lower || tight || y < capFrom ? clamp(u, -0.95, 0.95) : u) * gh, py];
+      // Over the tops of the shoulders the surface is nearly horizontal, so the garment's top
+      // edge would cut it raggedly between rings. Outside the neckline the piece covers up to
+      // its top ring; only the neckline is trimmed by the photo's outline.
+      const pyc = !lower && Math.abs(u) > 0.45 ? Math.max(py, anchorRow + 2) : py;
+      return [ca + ax * shrink, y, cb + az * shrink, gc + (lower || y < capFrom ? clamp(u, -0.95, 0.95) : u) * gh, pyc];
     };
   };
 

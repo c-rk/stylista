@@ -13,9 +13,8 @@ import type { BodyParams, Garment, GarmentKind } from '@/types';
 import { SyntheticGarment, syntheticGarment, SyntheticKind } from '@/vision/synthetic';
 import { buildAccessory } from './garments';
 import { Anchors, anchors as bodyAnchors } from './human/anchors';
-import { bodyFrame, BodyFrame, buildCloth, Cloth, Occupancy } from './human/cloth';
+import { bodyFrame, BodyFrame, buildCloth, Cloth, NT, Occupancy } from './human/cloth';
 import { setGeometry, skinColors } from './human/geometry';
-import { loft, Ring } from './loft';
 import { useHuman } from './human/load';
 import type { FittedBody, HumanModel } from './human/model';
 
@@ -282,6 +281,30 @@ function subdivide(g: THREE.BufferGeometry): THREE.BufferGeometry {
   return r;
 }
 
+let strandAlbedoTexture: THREE.DataTexture | undefined;
+/** Strand colour variation: lighter and darker strands across u, multiplied with the hair colour. */
+function strandAlbedo(): THREE.DataTexture {
+  if (strandAlbedoTexture) return strandAlbedoTexture;
+  const w = 256, h = 4;
+  let seed = 19;
+  const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+  const raw = Array.from({ length: w }, rnd);
+  const data = new Uint8Array(w * h * 4);
+  for (let x = 0; x < w; x++) {
+    const v = (raw[x] * 2 + raw[(x + 1) % w] + raw[(x + w - 1) % w]) / 4;
+    const tone = Math.round((0.72 + 0.28 * v) * 255);
+    for (let y = 0; y < h; y++) data.set([tone, tone, tone, 255], (y * w + x) * 4);
+  }
+  const t = new THREE.DataTexture(data, w, h, THREE.RGBAFormat);
+  t.colorSpace = THREE.SRGBColorSpace;
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  t.magFilter = THREE.LinearFilter;
+  t.minFilter = THREE.LinearMipmapLinearFilter;
+  t.generateMipmaps = true;
+  t.needsUpdate = true;
+  return (strandAlbedoTexture = t);
+}
+
 const smooth01 = (a: number, b: number, x: number) => {
   const t = Math.min(1, Math.max(0, (x - a) / (b - a)));
   return t * t * (3 - 2 * t);
@@ -345,34 +368,68 @@ function Hair({ body, model, fit, anchors, frame }: { body: BodyParams; model: H
     cap.computeVertexNormals();
     const list = [cap];
     if (long) {
-      // Curtain from ear level down past the shoulders, wrapping sides and back.
-      const top = cy - h * 0.6, bottom = frame.shoulderY - 0.12 * anchors.H;
-      const rings: Ring[] = [];
-      const n2 = 26;
-      for (let i = 0; i <= n2; i++) {
-        const y = bottom + ((top - bottom) * i) / n2;
-        const t = Math.min(1, Math.max(0, (y - (anchors.neck.y - 0.03)) / (top - anchors.neck.y + 0.03)));
-        const tz = frame.trunk.centreB(y), td = frame.trunk.depthHalf(y), th = frame.trunk.half(y);
-        const off = 0.014 * k;
-        const backZ = (cz - b * 1.02) * t + (tz - td) * (1 - t) - off;
-        const half = (a * 0.95 + base) * t + Math.min(th * 0.62, a * 1.25) * (1 - t) + off * 0.5;
-        const centre = cz * t + (tz - td * 0.2) * (1 - t);
-        // Ends taper and round off over the last few rings.
-        const end = smooth01(0, 4, i);
-        rings.push({ y, cx: 0, cz: centre, a: half * (0.86 + 0.14 * end), b: Math.max(0.03, centre - backZ) * (0.9 + 0.1 * end) });
+      // Loose hair: falls straight from the head, drapes over shoulders and upper back, and
+      // ends in an uneven hem that is longest at the back. Every point is kept outside the body.
+      const top = cy + h * 0.55, neckY = anchors.neck.y;
+      const R = 34, C = 64;
+      // Front edges sit behind the ears, so the hair frames the face instead of hanging beside it.
+      const t0 = Math.PI * 1.1, t1 = Math.PI * 1.9;
+      let seed = 5;
+      const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+      const jitter = Array.from({ length: C + 1 }, rnd);
+      const hem = jitter.map((_, j) => (jitter[Math.max(0, j - 1)] + jitter[j] * 2 + jitter[Math.min(C, j + 1)]) / 4);
+      const P = new Float32Array((R + 1) * (C + 1) * 3);
+      const UVs = new Float32Array((R + 1) * (C + 1) * 2);
+      const COL = new Float32Array((R + 1) * (C + 1) * 3);
+      const ha = a + base * 1.1, hb = b + base * 1.1;
+      for (let j = 0; j <= C; j++) {
+        const th = t0 + ((t1 - t0) * j) / C;
+        const back = Math.max(0, -Math.sin(th));
+        // Hem height: below the shoulder blades at the back, collarbone level at the sides.
+        const bottom = frame.shoulderY - anchors.H * (0.07 + 0.11 * back + 0.03 * hem[j]);
+        const pj = Math.round(((th % (Math.PI * 2)) / (Math.PI * 2)) * NT + NT) % NT;
+        // Head ellipse radius in this direction (hair hangs from here).
+        const ex = Math.cos(th) / ha, ez = Math.sin(th) / hb;
+        const rHead = 1 / Math.hypot(ex, ez);
+        for (let i = 0; i <= R; i++) {
+          const u = i / R;
+          const y = top + (bottom - top) * u;
+          // Centre moves from the head to the trunk as the hair falls past the neck.
+          const w = smooth01(neckY + 0.02, neckY - 0.08, y);
+          const ccx = 0, ccz = cz * (1 - w) + frame.trunk.centreB(y) * w;
+          // Follows the skull above its widest point, then falls straight.
+          const above = Math.max(0, (y - cy) / (h * 1.12));
+          let r = rHead * Math.sqrt(Math.max(0.05, 1 - above * above)) * (1 + 0.06 * u);
+          if (y < neckY + 0.04) {
+            const tcx = frame.trunk.centreA(y), tcz = frame.trunk.centreB(y);
+            // Distance from this curtain's centre to the body surface in direction th.
+            const br = frame.trunk.radius(y, pj);
+            const bx = tcx + br * Math.cos(th) - ccx, bz = tcz + br * Math.sin(th) - ccz;
+            r = Math.max(r, Math.hypot(bx, bz) + 0.012 * k);
+          }
+          // Ends thin out slightly inward.
+          r *= 1 - 0.04 * smooth01(0.85, 1, u);
+          const o = (i * (C + 1) + j) * 3;
+          P[o] = ccx + r * Math.cos(th);
+          P[o + 1] = y;
+          P[o + 2] = ccz + r * Math.sin(th);
+          UVs.set([(th / (Math.PI * 2)) * 14, (cy + h - y) * 4], (i * (C + 1) + j) * 2);
+          const tone = 0.86 + 0.14 * (1 - u) - 0.08 * smooth01(0.9, 1, u);
+          COL.set([tone, tone, tone], o);
+        }
       }
-      const g = loft(rings, { segments: 40, arc: [Math.PI * 1.16, Math.PI * 1.84] });
-      const gp = g.attributes.position;
-      const guv = new Float32Array(gp.count * 2);
-      const gcol = new Float32Array(gp.count * 3);
-      for (let i = 0; i < gp.count; i++) {
-        guv[i * 2] = (Math.atan2(gp.getX(i), gp.getZ(i) - cz) / (Math.PI * 2)) * 14;
-        guv[i * 2 + 1] = (cy + h - gp.getY(i)) * 4;
-        const tip = 0.82 + 0.18 * smooth01(bottom, bottom + 0.08, gp.getY(i));
-        gcol.set([tip, tip, tip], i * 3);
-      }
-      g.setAttribute('uv', new THREE.BufferAttribute(guv, 2));
-      g.setAttribute('color', new THREE.BufferAttribute(gcol, 3));
+      const idx: number[] = [];
+      for (let i = 0; i < R; i++)
+        for (let j = 0; j < C; j++) {
+          const p0 = i * (C + 1) + j, p1 = p0 + C + 1;
+          idx.push(p0, p1, p0 + 1, p0 + 1, p1, p1 + 1);
+        }
+      const g = new THREE.BufferGeometry();
+      g.setAttribute('position', new THREE.BufferAttribute(P, 3));
+      g.setAttribute('uv', new THREE.BufferAttribute(UVs, 2));
+      g.setAttribute('color', new THREE.BufferAttribute(COL, 3));
+      g.setIndex(idx);
+      g.computeVertexNormals();
       list.push(g);
     }
     return list;
@@ -386,6 +443,7 @@ function Hair({ body, model, fit, anchors, frame }: { body: BodyParams; model: H
           <meshPhysicalMaterial
             color={body.hairColor}
             vertexColors
+            map={strandAlbedo()}
             normalMap={normalMap}
             normalScale={HAIR_NORMAL}
             roughness={0.5}
@@ -449,6 +507,50 @@ function FaceDecal({ face, model, fit, anchors }: { face: NonNullable<BodyParams
   );
 }
 
+const PORE_SCALE = new THREE.Vector2(0.22, 0.22);
+let poreTexture: THREE.DataTexture | undefined;
+/** Tiling skin micro-detail: fine pores and creases as a normal map, read through uv1. */
+function pores(): THREE.DataTexture {
+  if (poreTexture) return poreTexture;
+  const n = 128;
+  let seed = 3;
+  const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+  const hgt = new Float32Array(n * n);
+  // Sum of a few octaves of smoothed noise, plus sparse pits for pores.
+  for (const [cell, amp] of [[16, 0.5], [8, 0.3], [4, 0.2]] as const) {
+    const g = Array.from({ length: (n / cell) ** 2 }, rnd);
+    const m = n / cell;
+    for (let y = 0; y < n; y++)
+      for (let x = 0; x < n; x++) {
+        const fx = x / cell, fy = y / cell, x0 = Math.floor(fx), y0 = Math.floor(fy);
+        const tx = fx - x0, ty = fy - y0;
+        const v = (ix: number, iy: number) => g[((iy % m) * m + (ix % m)) % g.length];
+        const a = v(x0, y0) * (1 - tx) + v(x0 + 1, y0) * tx, b = v(x0, y0 + 1) * (1 - tx) + v(x0 + 1, y0 + 1) * tx;
+        hgt[y * n + x] += (a * (1 - ty) + b * ty) * amp;
+      }
+  }
+  for (let k = 0; k < 420; k++) {
+    const px = Math.floor(rnd() * n), py = Math.floor(rnd() * n);
+    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) hgt[((py + dy + n) % n) * n + ((px + dx + n) % n)] -= dx || dy ? 0.12 : 0.3;
+  }
+  const data = new Uint8Array(n * n * 4);
+  for (let y = 0; y < n; y++)
+    for (let x = 0; x < n; x++) {
+      const dx = (hgt[y * n + ((x + 1) % n)] - hgt[y * n + ((x + n - 1) % n)]) * 2;
+      const dy = (hgt[((y + 1) % n) * n + x] - hgt[((y + n - 1) % n) * n + x]) * 2;
+      const l = Math.hypot(dx, dy, 1);
+      data.set([Math.round((-dx / l) * 127 + 128), Math.round((-dy / l) * 127 + 128), Math.round((1 / l) * 127 + 128), 255], (y * n + x) * 4);
+    }
+  const t = new THREE.DataTexture(data, n, n, THREE.RGBAFormat);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  t.magFilter = THREE.LinearFilter;
+  t.minFilter = THREE.LinearMipmapLinearFilter;
+  t.generateMipmaps = true;
+  t.channel = 1;
+  t.needsUpdate = true;
+  return (poreTexture = t);
+}
+
 let irisTexture: THREE.DataTexture | undefined;
 /** Eyeball texture for a sphere whose +v pole faces forward: pupil, streaked iris, limbal ring, sclera. */
 function iris(): THREE.DataTexture {
@@ -505,7 +607,12 @@ function Body({ body, model, fit, anchors, frame }: { body: BodyParams; model: H
     // Eyebrow tint is expressed relative to the skin colour it multiplies.
     const rel: [number, number, number] = [brow.r / Math.max(0.05, skinTone.r), brow.g / Math.max(0.05, skinTone.g), brow.b / Math.max(0.05, skinTone.b)];
     const features = face ? null : { eyeY: anchors.eyes.y, eyeDx: anchors.eyes.dx, chinY: anchors.chinY, frontZ: anchors.head.cz };
-    skin.setAttribute('color', new THREE.BufferAttribute(skinColors(model, fit, features, rel), 3));
+    skin.setAttribute('color', new THREE.BufferAttribute(skinColors(model, fit, features, rel, { wristY: Math.max(anchors.hand[1][1], anchors.hand[-1][1]) + 0.08, kneeY: anchors.kneeY }), 3));
+    // Second UV set for pore-scale detail, tiled densely over the body's texture layout.
+    const uv0 = skin.attributes.uv.array as Float32Array;
+    const uv1 = new Float32Array(uv0.length);
+    for (let i = 0; i < uv0.length; i++) uv1[i] = uv0[i] * 90;
+    skin.setAttribute('uv1', new THREE.BufferAttribute(uv1, 2));
     return { skin, eyeL: balls[0], eyeR: balls[1], lashes: setGeometry(model, fit, 'lashes') };
   }, [model, fit, face, anchors, body.hairColor, body.skin]);
   useDisposable(useMemo(() => Object.values(geo), [geo]));
@@ -514,7 +621,19 @@ function Body({ body, model, fit, anchors, frame }: { body: BodyParams; model: H
   return (
     <group>
       <mesh geometry={geo.skin} castShadow receiveShadow>
-        <meshPhysicalMaterial color={body.skin} vertexColors roughness={0.56} sheen={0.22} sheenRoughness={0.5} sheenColor="#e8765f" />
+        <meshPhysicalMaterial
+          color={body.skin}
+          vertexColors
+          roughness={0.5}
+          normalMap={pores()}
+          normalScale={PORE_SCALE}
+          sheen={0.3}
+          sheenRoughness={0.45}
+          sheenColor="#e0705a"
+          specularIntensity={0.55}
+          clearcoat={0.04}
+          clearcoatRoughness={0.4}
+        />
       </mesh>
       {[geo.eyeL, geo.eyeR].map((g, i) => (
         <mesh key={i} geometry={g}>
@@ -691,6 +810,9 @@ export function Stage({ body, garments, focus = 'full', autoRotate = true, inter
         gl={{ antialias: true }}
         onCreated={({ gl, scene }) => {
           gl.localClippingEnabled = true;
+          // Neutral tone mapping keeps garment colours true to the photo while rolling off highlights.
+          gl.toneMapping = THREE.NeutralToneMapping;
+          gl.toneMappingExposure = 1.0;
           // Image-based lighting from a procedural studio room; skipped where the GPU cannot
           // render the required float targets, leaving the direct lights below.
           try {
@@ -721,6 +843,8 @@ export function Stage({ body, garments, focus = 'full', autoRotate = true, inter
           shadow-camera-far={12}
         />
         <directionalLight position={[-3.5, 2, 2]} intensity={0.5} color="#cfd6ff" />
+        {/* Rim light from behind-left: separates the silhouette from the dark backdrop. */}
+        <directionalLight position={[-2.5, 3.2, -3]} intensity={1.4} color="#dfe6ff" />
         <directionalLight position={[0.5, 3, -4]} intensity={1.0} color="#ffe6c9" />
         {model && <Figure body={body} model={model} garments={garments} />}
         <Ground radius={H * 0.3} />

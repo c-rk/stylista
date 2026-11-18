@@ -74,7 +74,8 @@ function draw(kind: SyntheticKind, s: GarmentShape): { w: number; h: number; alp
     // Fitted sleeveless top with a shallow neckline, long enough to meet the shorts.
     const h = 150 + M * 2;
     // Level shoulder line: the armhole is then a clean vertical cut at the shoulder point.
-    const left: Pt[] = [[cx - 22, M + 2], [cx - hw - 4, M + 2], [cx - hw - 1, M + 64], [cx - 54, M + 146]];
+    // Straps end inside the shoulder point; the armhole curves down to the underarm.
+    const left: Pt[] = [[cx - 22, M + 2], [cx - hw + 14, M + 2], [cx - hw + 4, M + 30], [cx - hw - 1, M + 64], [cx - 54, M + 146]];
     const scoop: Pt[] = Array.from({ length: 9 }, (_, i): Pt => [cx - 22 + (44 * i) / 8, M + 2 + Math.sin((i / 8) * Math.PI) * 13]).reverse();
     return { w: W, h, alpha: fill(W, h, [[...mirror(left, cx), ...scoop]]), scanKind: 'top', sleeveless: true };
   }
